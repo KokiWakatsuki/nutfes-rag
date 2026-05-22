@@ -5,9 +5,15 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 const EMBED_MODEL = "gemini-embedding-001";
 const CHAT_MODEL = "gemini-2.0-flash";
 
+// Supabase の vector(768) に合わせて次元数を固定
+const EMBEDDING_DIMENSIONS = 768;
+
 export async function generateEmbedding(text: string): Promise<number[]> {
   const model = genAI.getGenerativeModel({ model: EMBED_MODEL });
-  const result = await model.embedContent(text);
+  const result = await model.embedContent({
+    content: { parts: [{ text }], role: "user" },
+    outputDimensionality: EMBEDDING_DIMENSIONS,
+  } as Parameters<typeof model.embedContent>[0]);
   return result.embedding.values;
 }
 
@@ -18,6 +24,7 @@ export async function generateEmbeddingBatch(texts: string[]): Promise<number[][
   const result = await model.batchEmbedContents({
     requests: texts.map((text) => ({
       content: { parts: [{ text }], role: "user" },
+      outputDimensionality: EMBEDDING_DIMENSIONS,
     })),
   });
   return result.embeddings.map((e) => e.values);

@@ -84,6 +84,11 @@ async function syncDrive(
 
       const embeddings = await generateEmbeddingBatch(chunks);
 
+      // 最初の1件だけ次元数をログ出力（モデル変更時の確認用）
+      if (i === 0) {
+        console.log(`  埋め込み次元数: ${embeddings[0]?.length ?? "不明"}`);
+      }
+
       for (let j = 0; j < chunks.length; j++) {
         await upsertDocument({
           file_id: file.id,
@@ -98,7 +103,9 @@ async function syncDrive(
       processed++;
       console.log(`${progress} ✓ ${file.name} (${chunks.length} チャンク)`);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = err instanceof Error
+        ? err.message
+        : (err as { message?: string })?.message ?? String(err);
 
       // 日次クォータ超過は致命的エラー → 残りを諦める
       if (msg.includes("429") || msg.toLowerCase().includes("quota")) {
@@ -109,7 +116,10 @@ async function syncDrive(
         return { processed, skipped: files.length - newFiles.length, errors };
       }
 
-      console.error(`${progress} ✗ ${file.name}: ${msg}`);
+      const detail = (err as { details?: string; code?: string; hint?: string })?.details
+        ?? (err as { code?: string })?.code
+        ?? JSON.stringify(err);
+      console.error(`${progress} ✗ ${file.name}: ${msg || detail}`);
       errors++;
     }
   }
