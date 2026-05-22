@@ -1,0 +1,41 @@
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+
+const EMBED_MODEL = "text-embedding-004";
+const CHAT_MODEL = "gemini-2.0-flash";
+
+export async function generateEmbedding(text: string): Promise<number[]> {
+  const model = genAI.getGenerativeModel({ model: EMBED_MODEL });
+  const result = await model.embedContent(text);
+  return result.embedding.values;
+}
+
+export async function generateAnswer(
+  question: string,
+  contexts: Array<{ file_name: string; content: string; edition: number }>
+): Promise<string> {
+  const model = genAI.getGenerativeModel({ model: CHAT_MODEL });
+
+  const contextText = contexts
+    .map(
+      (c, i) =>
+        `【資料 ${i + 1}: ${c.file_name}（第${c.edition}回）】\n${c.content}`
+    )
+    .join("\n\n---\n\n");
+
+  const prompt = `あなたは学祭実行委員のAIアシスタントです。
+以下の資料を参考にして、質問に日本語で答えてください。
+資料に記載されていない内容については「資料には記載がありません」と明示してください。
+
+【参考資料】
+${contextText}
+
+【質問】
+${question}
+
+【回答】`;
+
+  const result = await model.generateContent(prompt);
+  return result.response.text();
+}
