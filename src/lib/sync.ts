@@ -1,6 +1,6 @@
 import drives from "../../config/drives.json";
 import { listAllFiles, fetchFileContent, chunkText } from "./drive";
-import { generateEmbedding } from "./gemini";
+import { generateEmbeddingBatch } from "./gemini";
 import { upsertDocument, getIndexedFileIds } from "./supabase";
 
 export interface SyncResult {
@@ -71,25 +71,27 @@ async function syncDrive(
       }
 
       const chunks = chunkText(content);
-      for (const chunk of chunks) {
-        await sleep(EMBED_INTERVAL_MS);
-        embedCallCount++;
 
-        // 1500 RPD 上限に近づいたら警告
-        if (embedCallCount === 1400) {
-          console.warn(
-            "⚠️  本日の Gemini API 呼び出しが 1400 回に達しました。上限（1500回/日）まで残り少ないです。"
-          );
-        }
+      // ファイル単位でバッチ処理（複数チャンクを1回のAPI呼び出しで処理）
+      await sleep(EMBED_INTERVAL_MS);
+      embedCallCount++;
 
-        const embedding = await generateEmbedding(chunk);
+      if (embedCallCount === 1400) {
+        console.warn(
+          "⚠️  本日の Gemini API 呼び出しが 1400 回に達しました。上限まで残り少ないです。"
+        );
+      }
+
+      const embeddings = await generateEmbeddingBatch(chunks);
+
+      for (let j = 0; j < chunks.length; j++) {
         await upsertDocument({
           file_id: file.id,
           file_name: file.name,
-          content: chunk,
+          content: chunks[j],
           edition,
           drive_id: driveId,
-          embedding,
+          embedding: embeddings[j],
         });
       }
 
@@ -101,7 +103,7 @@ async function syncDrive(
       // 日次クォータ超過は致命的エラー → 残りを諦める
       if (msg.includes("429") || msg.toLowerCase().includes("quota")) {
         console.error(
-          `\n❌ Gemini API の1日の上限（1500回）に達しました。明日以降に再実行してください。`
+          `\n❌ Gemini API の1日の上限に達しました。明日以降に再実行してください。`
         );
         console.error(`   中断時点: ${i + 1}/${newFiles.length} 件処理済み`);
         return { processed, skipped: files.length - newFiles.length, errors };

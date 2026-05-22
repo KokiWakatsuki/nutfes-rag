@@ -126,7 +126,7 @@ export async function fetchFileContent(
   return Buffer.from(res.data as ArrayBuffer).toString("utf-8");
 }
 
-export function chunkText(text: string, maxChars = 1500): string[] {
+export function chunkText(text: string, maxChars = 3000): string[] {
   const paragraphs = text.split(/\n{2,}/);
   const chunks: string[] = [];
   let current = "";

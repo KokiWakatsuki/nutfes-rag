@@ -2,13 +2,25 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-const EMBED_MODEL = "text-embedding-004";
+const EMBED_MODEL = "gemini-embedding-001";
 const CHAT_MODEL = "gemini-2.0-flash";
 
 export async function generateEmbedding(text: string): Promise<number[]> {
   const model = genAI.getGenerativeModel({ model: EMBED_MODEL });
   const result = await model.embedContent(text);
   return result.embedding.values;
+}
+
+// 複数チャンクを1回のAPI呼び出しでまとめて処理する
+// batchEmbedContents がクォータ1消費/バッチなら処理速度が大幅改善
+export async function generateEmbeddingBatch(texts: string[]): Promise<number[][]> {
+  const model = genAI.getGenerativeModel({ model: EMBED_MODEL });
+  const result = await model.batchEmbedContents({
+    requests: texts.map((text) => ({
+      content: { parts: [{ text }], role: "user" },
+    })),
+  });
+  return result.embeddings.map((e) => e.values);
 }
 
 export async function generateAnswer(
