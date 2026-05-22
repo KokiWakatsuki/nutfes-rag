@@ -70,7 +70,7 @@ export default function ChatClient({ editions }: { editions: number[] }) {
       } else {
         setMessages((prev) => [
           ...prev,
-          { role: "assistant", content: `同期エラー: ${data.error}` },
+          { role: "assistant", content: `同期エラー: ${data.error}${data.details ? `\n詳細: ${data.details}` : ""}` },
         ]);
       }
     } finally {

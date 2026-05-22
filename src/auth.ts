@@ -4,6 +4,7 @@ import Google from "next-auth/providers/google";
 const ALLOWED_SUFFIX = process.env.ALLOWED_EMAIL_SUFFIX ?? ".nutfes@gmail.com";
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
+  trustHost: true,
   providers: [
     Google({
       clientId: process.env.GOOGLE_CLIENT_ID!,
