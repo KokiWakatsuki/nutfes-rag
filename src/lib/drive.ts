@@ -1,4 +1,5 @@
 import { google } from "googleapis";
+import { PDFParse } from "pdf-parse";
 
 const EXPORTABLE_MIME_TYPES: Record<string, string> = {
   "application/vnd.google-apps.document": "text/plain",
@@ -83,26 +84,40 @@ export async function fetchFileContent(
     return String(res.data);
   }
 
-  // binary download (PDF, plain text)
+  // PDF: テキスト抽出
+  if (mimeType === "application/pdf") {
+    const res = await drive.files.get(
+      { fileId, alt: "media" },
+      { responseType: "arraybuffer" }
+    );
+    const buf = Buffer.from(res.data as ArrayBuffer);
+    const parser = new PDFParse({ data: buf });
+    const result = await parser.getText();
+    return result.text;
+  }
+
+  // plain text
   const res = await drive.files.get(
     { fileId, alt: "media" },
     { responseType: "arraybuffer" }
   );
-  const buf = Buffer.from(res.data as ArrayBuffer);
-  return buf.toString("utf-8");
+  return Buffer.from(res.data as ArrayBuffer).toString("utf-8");
 }
 
-export function chunkText(text: string, maxChars = 2000): string[] {
+export function chunkText(text: string, maxChars = 1500): string[] {
   const paragraphs = text.split(/\n{2,}/);
   const chunks: string[] = [];
   let current = "";
 
   for (const para of paragraphs) {
-    if (current.length + para.length > maxChars && current.length > 0) {
+    const trimmed = para.trim();
+    if (!trimmed) continue;
+
+    if (current.length + trimmed.length > maxChars && current.length > 0) {
       chunks.push(current.trim());
       current = "";
     }
-    current += para + "\n\n";
+    current += trimmed + "\n\n";
   }
   if (current.trim()) chunks.push(current.trim());
   return chunks;

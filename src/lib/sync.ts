@@ -9,13 +9,21 @@ export interface SyncResult {
   errors: number;
 }
 
+// Gemini Embedding API: 無料枠 100 RPM / 1500 RPD
+// 700ms 間隔 ≒ 85 RPM で安全に収まる
+const EMBED_INTERVAL_MS = 700;
+
+async function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function syncAllDrives(): Promise<SyncResult> {
   let processed = 0;
   let skipped = 0;
   let errors = 0;
 
   for (const { edition, driveId } of drives) {
-    console.log(`Syncing drive for edition ${edition}: ${driveId}`);
+    console.log(`\n=== 第${edition}回 (${driveId}) ===`);
     const result = await syncDrive(driveId, edition);
     processed += result.processed;
     skipped += result.skipped;
@@ -29,28 +37,42 @@ async function syncDrive(
   driveId: string,
   edition: number
 ): Promise<SyncResult> {
+  console.log("ファイル一覧を取得中...");
   const files = await listAllFiles(driveId);
   const indexedIds = new Set(await getIndexedFileIds(driveId));
 
-  let processed = 0;
-  let skipped = 0;
-  let errors = 0;
+  const newFiles = files.filter((f) => !indexedIds.has(f.id));
+  console.log(
+    `合計 ${files.length} 件 / 未処理 ${newFiles.length} 件 / スキップ ${files.length - newFiles.length} 件`
+  );
 
-  for (const file of files) {
-    if (indexedIds.has(file.id)) {
-      skipped++;
-      continue;
-    }
+  let processed = 0;
+  let errors = 0;
+  let embedCallCount = 0;
+
+  for (let i = 0; i < newFiles.length; i++) {
+    const file = newFiles[i];
+    const progress = `[${i + 1}/${newFiles.length}]`;
 
     try {
       const content = await fetchFileContent(file.id, file.mimeType);
       if (!content.trim()) {
-        skipped++;
+        console.log(`${progress} スキップ（空）: ${file.name}`);
         continue;
       }
 
       const chunks = chunkText(content);
       for (const chunk of chunks) {
+        await sleep(EMBED_INTERVAL_MS);
+        embedCallCount++;
+
+        // 1500 RPD 上限に近づいたら警告
+        if (embedCallCount === 1400) {
+          console.warn(
+            "⚠️  本日の Gemini API 呼び出しが 1400 回に達しました。上限（1500回/日）まで残り少ないです。"
+          );
+        }
+
         const embedding = await generateEmbedding(chunk);
         await upsertDocument({
           file_id: file.id,
@@ -63,12 +85,27 @@ async function syncDrive(
       }
 
       processed++;
-      console.log(`  ✓ ${file.name}`);
-    } catch (err) {
-      console.error(`  ✗ ${file.name}:`, err);
+      console.log(`${progress} ✓ ${file.name} (${chunks.length} チャンク)`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+
+      // 日次クォータ超過は致命的エラー → 残りを諦める
+      if (msg.includes("429") || msg.toLowerCase().includes("quota")) {
+        console.error(
+          `\n❌ Gemini API の1日の上限（1500回）に達しました。明日以降に再実行してください。`
+        );
+        console.error(`   中断時点: ${i + 1}/${newFiles.length} 件処理済み`);
+        return { processed, skipped: files.length - newFiles.length, errors };
+      }
+
+      console.error(`${progress} ✗ ${file.name}: ${msg}`);
       errors++;
     }
   }
 
-  return { processed, skipped, errors };
+  return {
+    processed,
+    skipped: files.length - newFiles.length,
+    errors,
+  };
 }
