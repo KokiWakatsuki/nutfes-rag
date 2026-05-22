@@ -7,8 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "sync": "tsx scripts/sync.ts",
-    "estimate": "tsx scripts/estimate.ts"
+    "sync": "tsx --env-file=.env.local scripts/sync.ts",
+    "estimate": "tsx --env-file=.env.local scripts/estimate.ts"
   },
   "repository": {
     "type": "git",
