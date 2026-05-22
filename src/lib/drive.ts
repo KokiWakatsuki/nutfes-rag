@@ -28,45 +28,41 @@ export interface DriveFile {
   modifiedTime: string;
 }
 
-export async function listAllFiles(driveId: string): Promise<DriveFile[]> {
+export async function listAllFiles(folderId: string): Promise<DriveFile[]> {
   const auth = getAuthClient();
   const drive = google.drive({ version: "v3", auth });
-
   const files: DriveFile[] = [];
-  let pageToken: string | undefined;
 
-  do {
-    const res = await drive.files.list({
-      driveId,
-      includeItemsFromAllDrives: true,
-      supportsAllDrives: true,
-      corpora: "drive",
-      fields:
-        "nextPageToken, files(id, name, mimeType, modifiedTime, trashed)",
-      pageToken,
-      pageSize: 1000,
-    });
+  async function listFolder(parentId: string) {
+    let pageToken: string | undefined;
+    do {
+      const res = await drive.files.list({
+        q: `'${parentId}' in parents and trashed = false`,
+        includeItemsFromAllDrives: true,
+        supportsAllDrives: true,
+        fields: "nextPageToken, files(id, name, mimeType, modifiedTime)",
+        pageToken,
+        pageSize: 1000,
+      });
 
-    const items = res.data.files ?? [];
-    for (const f of items) {
-      if (
-        !f.trashed &&
-        f.id &&
-        f.name &&
-        f.mimeType &&
-        SUPPORTED_MIME_TYPES.has(f.mimeType)
-      ) {
-        files.push({
-          id: f.id,
-          name: f.name,
-          mimeType: f.mimeType,
-          modifiedTime: f.modifiedTime ?? "",
-        });
+      for (const f of res.data.files ?? []) {
+        if (!f.id || !f.name || !f.mimeType) continue;
+        if (f.mimeType === "application/vnd.google-apps.folder") {
+          await listFolder(f.id);
+        } else if (SUPPORTED_MIME_TYPES.has(f.mimeType)) {
+          files.push({
+            id: f.id,
+            name: f.name,
+            mimeType: f.mimeType,
+            modifiedTime: f.modifiedTime ?? "",
+          });
+        }
       }
-    }
-    pageToken = res.data.nextPageToken ?? undefined;
-  } while (pageToken);
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+  }
 
+  await listFolder(folderId);
   return files;
 }
 
