@@ -22,6 +22,15 @@ export async function syncAllDrives(): Promise<SyncResult> {
   let skipped = 0;
   let errors = 0;
 
+  const syncTypes = process.env.SYNC_TYPES ?? "all";
+  const typeLabels: Record<string, string> = {
+    all: "全種別（PDF 含む）",
+    "no-pdf": "PDF を除外",
+    "docs-slides": "ドキュメント・スライドのみ",
+    docs: "ドキュメントのみ",
+  };
+  console.log(`対象種別: ${typeLabels[syncTypes] ?? syncTypes} (SYNC_TYPES=${syncTypes})`);
+
   for (const { edition, driveId } of drives) {
     console.log(`\n=== 第${edition}回 (${driveId}) ===`);
     const result = await syncDrive(driveId, edition);

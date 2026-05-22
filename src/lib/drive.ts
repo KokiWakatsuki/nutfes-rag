@@ -7,11 +7,33 @@ const EXPORTABLE_MIME_TYPES: Record<string, string> = {
   "application/vnd.google-apps.presentation": "text/plain",
 };
 
-const SUPPORTED_MIME_TYPES = new Set([
+const ALL_MIME_TYPES = new Set([
   ...Object.keys(EXPORTABLE_MIME_TYPES),
   "application/pdf",
   "text/plain",
 ]);
+
+// SYNC_TYPES 環境変数で対象 MIME タイプを絞り込む
+// all (デフォルト) | no-pdf | docs-slides | docs
+const SYNC_TYPES_FILTER: Record<string, Set<string>> = {
+  all: ALL_MIME_TYPES,
+  "no-pdf": new Set([
+    "application/vnd.google-apps.document",
+    "application/vnd.google-apps.spreadsheet",
+    "application/vnd.google-apps.presentation",
+    "text/plain",
+  ]),
+  "docs-slides": new Set([
+    "application/vnd.google-apps.document",
+    "application/vnd.google-apps.presentation",
+  ]),
+  docs: new Set(["application/vnd.google-apps.document"]),
+};
+
+function getEnabledMimeTypes(): Set<string> {
+  const key = (process.env.SYNC_TYPES ?? "all").toLowerCase();
+  return SYNC_TYPES_FILTER[key] ?? ALL_MIME_TYPES;
+}
 
 function getAuthClient() {
   const keyJson = process.env.GOOGLE_SERVICE_ACCOUNT_KEY!;
@@ -50,7 +72,7 @@ export async function listAllFiles(folderId: string): Promise<DriveFile[]> {
         if (!f.id || !f.name || !f.mimeType) continue;
         if (f.mimeType === "application/vnd.google-apps.folder") {
           await listFolder(f.id);
-        } else if (SUPPORTED_MIME_TYPES.has(f.mimeType)) {
+        } else if (getEnabledMimeTypes().has(f.mimeType)) {
           files.push({
             id: f.id,
             name: f.name,
