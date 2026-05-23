@@ -30,6 +30,32 @@ export async function generateEmbeddingBatch(texts: string[]): Promise<number[][
   return result.embeddings.map((e) => e.values);
 }
 
+// Gemini inline data の上限（20MB）
+const GEMINI_INLINE_LIMIT = 20 * 1024 * 1024;
+
+// スキャンPDF・画像・Officeファイルなどのテキスト抽出
+export async function extractFileContent(
+  buffer: Buffer,
+  mimeType: string
+): Promise<string> {
+  if (buffer.length > GEMINI_INLINE_LIMIT) {
+    throw new Error(
+      `ファイルサイズ超過 (${(buffer.length / 1024 / 1024).toFixed(1)} MB > 20 MB)`
+    );
+  }
+  const model = genAI.getGenerativeModel({ model: CHAT_MODEL });
+  const result = await model.generateContent([
+    {
+      inlineData: {
+        mimeType,
+        data: buffer.toString("base64"),
+      },
+    },
+    "このファイルに含まれるテキストをすべて書き起こしてください。表・図・画像内の文字も含めてください。書き起こした内容のみを出力してください。",
+  ]);
+  return result.response.text();
+}
+
 export async function generateAnswer(
   question: string,
   contexts: Array<{ file_name: string; content: string; edition: number }>

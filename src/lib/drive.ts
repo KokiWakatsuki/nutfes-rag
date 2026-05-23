@@ -1,27 +1,69 @@
 import { google } from "googleapis";
 import { PDFParse } from "pdf-parse";
+import { extractFileContent as geminiExtract } from "./gemini";
 
+// Google Workspace → Drive export API
 const EXPORTABLE_MIME_TYPES: Record<string, string> = {
   "application/vnd.google-apps.document": "text/plain",
   "application/vnd.google-apps.spreadsheet": "text/csv",
   "application/vnd.google-apps.presentation": "text/plain",
 };
 
-const ALL_MIME_TYPES = new Set([
-  ...Object.keys(EXPORTABLE_MIME_TYPES),
+// Gemini でテキスト抽出するファイル種別（スキャンPDF含む）
+export const GEMINI_EXTRACT_TYPES = new Set([
   "application/pdf",
-  "text/plain",
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+  "image/heic",
+  "image/heif",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/msword",
+  "application/vnd.ms-excel",
+  "application/vnd.ms-powerpoint",
 ]);
 
-// SYNC_TYPES 環境変数で対象 MIME タイプを絞り込む
+// 直接ダウンロードできるテキスト系ファイル
+const TEXT_DOWNLOAD_TYPES = new Set([
+  "text/plain",
+  "text/csv",
+  "text/html",
+  "text/markdown",
+  "application/json",
+]);
+
+// 全対応 MIME タイプ
+export const ALL_MIME_TYPES = new Set([
+  ...Object.keys(EXPORTABLE_MIME_TYPES),
+  ...GEMINI_EXTRACT_TYPES,
+  ...TEXT_DOWNLOAD_TYPES,
+]);
+
+// テキストPDFか判定する最小文字数（これ未満ならスキャンPDFとして Gemini に渡す）
+const MIN_PDF_TEXT_CHARS = 100;
+
+// SYNC_TYPES 環境変数で対象を絞り込む
 // all (デフォルト) | no-pdf | docs-slides | docs
 const SYNC_TYPES_FILTER: Record<string, Set<string>> = {
   all: ALL_MIME_TYPES,
   "no-pdf": new Set([
-    "application/vnd.google-apps.document",
-    "application/vnd.google-apps.spreadsheet",
-    "application/vnd.google-apps.presentation",
-    "text/plain",
+    ...Object.keys(EXPORTABLE_MIME_TYPES),
+    ...TEXT_DOWNLOAD_TYPES,
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/heic",
+    "image/heif",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/msword",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
   ]),
   "docs-slides": new Set([
     "application/vnd.google-apps.document",
@@ -96,8 +138,8 @@ export async function fetchFileContent(
   const auth = getAuthClient();
   const drive = google.drive({ version: "v3", auth });
 
+  // Google Workspace → Drive export API（テキスト変換はGoogleが行う）
   const exportMime = EXPORTABLE_MIME_TYPES[mimeType];
-
   if (exportMime) {
     const res = await drive.files.export(
       { fileId, mimeType: exportMime },
@@ -106,24 +148,42 @@ export async function fetchFileContent(
     return String(res.data);
   }
 
-  // PDF: テキスト抽出
-  if (mimeType === "application/pdf") {
+  // テキスト系 → 直接ダウンロード
+  if (TEXT_DOWNLOAD_TYPES.has(mimeType)) {
+    const res = await drive.files.get(
+      { fileId, alt: "media" },
+      { responseType: "arraybuffer" }
+    );
+    return Buffer.from(res.data as ArrayBuffer).toString("utf-8");
+  }
+
+  // バイナリ系（PDF・画像・Office）→ バイナリダウンロード後に処理
+  if (GEMINI_EXTRACT_TYPES.has(mimeType)) {
     const res = await drive.files.get(
       { fileId, alt: "media" },
       { responseType: "arraybuffer" }
     );
     const buf = Buffer.from(res.data as ArrayBuffer);
-    const parser = new PDFParse({ data: buf });
-    const result = await parser.getText();
-    return result.text;
+
+    // テキストPDF: pdf-parse で高速処理（APIコスト不要）
+    if (mimeType === "application/pdf") {
+      try {
+        const parser = new PDFParse({ data: buf });
+        const result = await parser.getText();
+        if (result.text.trim().length >= MIN_PDF_TEXT_CHARS) {
+          return result.text;
+        }
+        // テキストが少ない → スキャンPDFとして Gemini に渡す
+      } catch {
+        // pdf-parse 失敗 → Gemini にフォールバック
+      }
+    }
+
+    // スキャンPDF・画像・Office: Gemini Flash でテキスト抽出
+    return await geminiExtract(buf, mimeType);
   }
 
-  // plain text
-  const res = await drive.files.get(
-    { fileId, alt: "media" },
-    { responseType: "arraybuffer" }
-  );
-  return Buffer.from(res.data as ArrayBuffer).toString("utf-8");
+  throw new Error(`未対応のファイル形式: ${mimeType}`);
 }
 
 export function chunkText(text: string, maxChars = 3000): string[] {
