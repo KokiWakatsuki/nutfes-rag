@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { syncAllDrives } from "@/lib/sync";
 
+// Vercel の最大実行時間（秒）
+export const maxDuration = 300;
+
 export async function POST(req: NextRequest) {
   // GitHub Actions の cron からのリクエストは Authorization ヘッダーで認証
   const authHeader = req.headers.get("authorization");

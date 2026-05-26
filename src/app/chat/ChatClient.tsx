@@ -58,6 +58,23 @@ export default function ChatClient({ editions }: { editions: number[] }) {
     setIsSyncing(true);
     try {
       const res = await fetch("/api/sync", { method: "POST" });
+
+      // レスポンスが JSON でない場合（タイムアウト・サーバーエラー等）
+      const contentType = res.headers.get("content-type") ?? "";
+      if (!contentType.includes("application/json")) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content:
+              res.status === 504 || res.status === 408
+                ? "同期がタイムアウトしました。ファイル数が多い場合は Vercel 上では完了できません。ローカルで `npm run sync` を実行してください。"
+                : `同期に失敗しました（HTTP ${res.status}）。ローカルで \`npm run sync\` を実行してください。`,
+          },
+        ]);
+        return;
+      }
+
       const data = await res.json();
       if (data.success) {
         setMessages((prev) => [
@@ -70,9 +87,20 @@ export default function ChatClient({ editions }: { editions: number[] }) {
       } else {
         setMessages((prev) => [
           ...prev,
-          { role: "assistant", content: `同期エラー: ${data.error}${data.details ? `\n詳細: ${data.details}` : ""}` },
+          {
+            role: "assistant",
+            content: `同期エラー: ${data.error}${data.details ? `\n詳細: ${data.details}` : ""}`,
+          },
         ]);
       }
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: `同期に失敗しました: ${err instanceof Error ? err.message : String(err)}`,
+        },
+      ]);
     } finally {
       setIsSyncing(false);
     }
