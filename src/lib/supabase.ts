@@ -91,6 +91,25 @@ export async function upsertDocument(doc: {
 }
 
 
+// グローバルレート制限（全 Vercel インスタンス間で共有、アトミック）
+// TRUE = 許可 / FALSE = 制限中
+export async function checkRateLimit(
+  email: string,
+  maxPerMinute = 20
+): Promise<boolean> {
+  const { data, error } = await getSupabase().rpc("check_rate_limit", {
+    p_email: email,
+    p_max_requests: maxPerMinute,
+    p_window_ms: 60_000,
+  });
+  if (error) {
+    // RPC失敗時はリクエストを通す（誤ブロックによるユーザー影響を防ぐ）
+    console.error("Rate limit check failed:", error.message);
+    return true;
+  }
+  return data === true;
+}
+
 // file_id → drive_modified_at (null if unknown) のマップを返す
 export async function getIndexedFiles(driveId: string): Promise<Map<string, string | null>> {
   const result = new Map<string, string | null>();

@@ -7,26 +7,10 @@ import {
   getChatSession,
   touchChatSession,
   saveChatMessage,
+  checkRateLimit,
 } from "@/lib/supabase";
 
 export const maxDuration = 300;
-
-// インスタンス内レート制限（20回/分/ユーザー）
-const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
-const RATE_LIMIT_MAX = 20;
-const RATE_LIMIT_WINDOW_MS = 60_000;
-
-function isRateLimited(email: string): boolean {
-  const now = Date.now();
-  const record = rateLimitStore.get(email);
-  if (!record || now > record.resetAt) {
-    rateLimitStore.set(email, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
-    return false;
-  }
-  if (record.count >= RATE_LIMIT_MAX) return true;
-  record.count++;
-  return false;
-}
 
 // セッション管理・会話履歴取得（embedding 生成と並列実行するための関数）
 async function setupSession(
@@ -55,8 +39,8 @@ export async function POST(req: NextRequest) {
   }
   const userEmail = session.user.email;
 
-  if (isRateLimited(userEmail)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  if (!(await checkRateLimit(userEmail))) {
+    return NextResponse.json({ error: "Too many requests. 1分後に再度お試しください。" }, { status: 429 });
   }
 
   const { question, editions, sessionId } = await req.json();

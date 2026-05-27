@@ -11,7 +11,8 @@
     "sync:ci": "tsx scripts/sync.ts",
     "estimate": "tsx --env-file=.env.local scripts/estimate.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "reindex": "tsx --env-file=.env.local scripts/reindex.ts"
   },
   "repository": {
     "type": "git",
