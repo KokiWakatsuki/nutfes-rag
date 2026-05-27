@@ -102,11 +102,12 @@ async function syncDrive(
   function printProgress(fileName?: string, final = false) {
     const done = completedCount;
     const total = newFiles.length;
+    const w = total.toString().length;
     const pct = total > 0 ? Math.round((done / total) * 100) : 100;
     const label = final ? "完了" : "進捗";
-    const filePart = fileName ? ` ${fileName}` : "";
+    const filePart = fileName ? ` | ${fileName}` : "";
     console.log(
-      `[${label}] ${done}/${total} (${pct}%)${filePart} | DB保存処理完了: ${processed} | 空/破損スキップ: ${empty} | エラー(要確認): ${errors} | DB保存済みによりスキップ: ${dbSkipped}`
+      `[${label}] ${String(done).padStart(w)}/${total} (${String(pct).padStart(3)}%) | DB保存処理完了: ${String(processed).padStart(w)} | 空/破損スキップ: ${String(empty).padStart(w)} | エラー(要確認): ${String(errors).padStart(w)} | DB保存済みによりスキップ: ${String(dbSkipped).padStart(w)}${filePart}`
     );
   }
 
