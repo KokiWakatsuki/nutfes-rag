@@ -128,10 +128,12 @@ async function syncDrive(
             const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
             const isNetworkTransient = msg.includes("ETIMEDOUT") || msg.includes("ECONNRESET") || msg.includes("ENOTFOUND") || msg.includes("fetch failed");
             const isRateLimit = (msg.includes("429") || msg.toLowerCase().includes("resource exhausted")) && !isDailyQuotaExhausted(msg);
+            const isTimeout = msg.includes("Gemini OCR timeout");
 
-            if ((isNetworkTransient || isRateLimit) && attempt < 3) {
-              const waitMs = isRateLimit ? 60000 : 3000 * (attempt + 1);
-              console.warn(`リトライ ${attempt + 1}/3 (${isRateLimit ? "レート制限" : "一時障害"}, ${waitMs / 1000}秒待機): ${file.name}`);
+            if ((isNetworkTransient || isRateLimit || isTimeout) && attempt < 3) {
+              const waitMs = isRateLimit ? 60_000 : isTimeout ? 15_000 : 3000 * (attempt + 1);
+              const reason = isRateLimit ? "レート制限" : isTimeout ? "タイムアウト" : "一時障害";
+              console.warn(`リトライ ${attempt + 1}/3 (${reason}, ${waitMs / 1000}秒待機): ${file.name}`);
               await sleep(waitMs);
               continue;
             }

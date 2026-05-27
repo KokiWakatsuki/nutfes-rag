@@ -1,6 +1,6 @@
 import { google } from "googleapis";
 import { PDFParse } from "pdf-parse";
-import { extractFileContent as geminiExtract } from "./gemini";
+import { extractFileContent as geminiExtract, GeminiSkippableError } from "./gemini";
 import officeParser from "officeparser";
 import { writeFileSync, unlinkSync } from "fs";
 import { tmpdir } from "os";
@@ -273,6 +273,13 @@ export async function fetchFileContent(
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return String((await (officeParser as any).parseOffice(tmpPath)) ?? "");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // officeparser が未対応の形式（.ppt/.doc/.xls など）は永続的エラー → スキップ
+      if (msg.includes("[OfficeParser]:")) {
+        throw new GeminiSkippableError(`OfficeParser unsupported: ${msg.slice(0, 120)}`);
+      }
+      throw err;
     } finally {
       unlinkSync(tmpPath);
     }
