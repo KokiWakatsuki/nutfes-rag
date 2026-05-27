@@ -184,7 +184,7 @@ async function listAllFilesParallel(
   const files: DriveFile[] = [];
   const folderQueue: string[] = [rootId];
   let folderCount = 0;
-  const FOLDER_CONCURRENCY = 10;
+  const FOLDER_CONCURRENCY = 20;
 
   async function processQueue() {
     while (folderQueue.length > 0) {

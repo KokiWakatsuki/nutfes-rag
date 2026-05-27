@@ -1,6 +1,13 @@
 import { google } from "googleapis";
 import { Storage } from "@google-cloud/storage";
 import { PDFDocument } from "pdf-lib";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import { writeFileSync, readFileSync, unlinkSync, existsSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+
+const execFileAsync = promisify(execFile);
 
 const PROJECT = process.env.GOOGLE_CLOUD_PROJECT!;
 const GCS_BUCKET = process.env.GCS_BUCKET;
@@ -133,37 +140,35 @@ async function uploadToGcsAndExtract(
   }
 }
 
-// GCS上限超えチャンクをJPEGに変換してGemini OCR（pdfjs-dist + canvas）
+// GCS上限超えチャンクをghostscriptでJPEGに変換してGemini OCR
 async function renderPdfToJpegs(pdfBuffer: Buffer): Promise<Buffer[]> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { getDocument, GlobalWorkerOptions } = await import("pdfjs-dist/legacy/build/pdf.mjs") as any;
-  const { createCanvas } = await import("canvas");
-  // pdf-parse も pdfjs-dist を依存に持つため workerSrc を明示指定してバージョン不一致を防ぐ
-  GlobalWorkerOptions.workerSrc = `file://${process.cwd()}/node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs`;
+  const uid = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const tmpPdf = join(tmpdir(), `pdfocr-${uid}.pdf`);
+  const tmpPrefix = join(tmpdir(), `pdfocr-${uid}`);
+  writeFileSync(tmpPdf, pdfBuffer);
+  try {
+    // 150 DPI JPEG: OCRに十分で20MB以内に収まる
+    await execFileAsync("gs", [
+      "-dNOPAUSE", "-dBATCH", "-dSAFER",
+      "-sDEVICE=jpeg", "-r150", "-dJPEGQ=90",
+      `-sOutputFile=${tmpPrefix}-%03d.jpg`,
+      tmpPdf,
+    ], { timeout: 180_000 });
 
-  const pdfDoc = await getDocument({ data: new Uint8Array(pdfBuffer) }).promise;
-  const numPages: number = pdfDoc.numPages;
-  const images: Buffer[] = [];
-
-  for (let pageNum = 1; pageNum <= numPages; pageNum++) {
-    const page = await pdfDoc.getPage(pageNum);
-    // scale=2.0 ≈ 144 DPI: OCRに十分な解像度で20MB以内に収まる
-    let scale = 2.0;
-    let jpeg: Buffer;
-    do {
-      const viewport = page.getViewport({ scale });
-      const canvas = createCanvas(Math.floor(viewport.width), Math.floor(viewport.height));
-      await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
-      jpeg = canvas.toBuffer("image/jpeg", { quality: 0.85 }) as Buffer;
-      if (jpeg.length > GEMINI_INLINE_LIMIT) scale -= 0.5;
-    } while (jpeg!.length > GEMINI_INLINE_LIMIT && scale > 0.5);
-
-    process.stdout.write(`    → p${pageNum}/${numPages} JPEG ${(jpeg!.length / 1024 / 1024).toFixed(1)}MB (scale=${scale})\n`);
-    images.push(jpeg!);
+    const images: Buffer[] = [];
+    for (let p = 1; ; p++) {
+      const jpgPath = `${tmpPrefix}-${String(p).padStart(3, "0")}.jpg`;
+      if (!existsSync(jpgPath)) break;
+      const buf = readFileSync(jpgPath);
+      unlinkSync(jpgPath);
+      process.stdout.write(`    → p${p} JPEG ${(buf.length / 1024 / 1024).toFixed(1)}MB\n`);
+      images.push(buf);
+    }
+    if (images.length === 0) throw new GeminiSkippableError("ghostscript: ページ画像が生成されませんでした");
+    return images;
+  } finally {
+    try { unlinkSync(tmpPdf); } catch {}
   }
-
-  await pdfDoc.destroy();
-  return images;
 }
 
 // PDFをページ単位で分割してGeminiに送り、結果を結合する
