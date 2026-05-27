@@ -82,12 +82,22 @@ export async function deleteDocumentsByDriveId(driveId: string): Promise<void> {
 }
 
 export async function getIndexedFileIds(driveId: string): Promise<string[]> {
-  const { data, error } = await getSupabase()
-    .from("documents")
-    .select("file_id")
-    .eq("drive_id", driveId);
-  if (error) throw error;
-  return (data ?? []).map((r) => r.file_id);
+  const allIds = new Set<string>();
+  const PAGE_SIZE = 1000;
+  let offset = 0;
+  while (true) {
+    const { data, error } = await getSupabase()
+      .from("documents")
+      .select("file_id")
+      .eq("drive_id", driveId)
+      .range(offset, offset + PAGE_SIZE - 1);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    data.forEach((r) => allIds.add(r.file_id));
+    if (data.length < PAGE_SIZE) break;
+    offset += PAGE_SIZE;
+  }
+  return Array.from(allIds);
 }
 
 // --- Chat Sessions ---
