@@ -24,11 +24,11 @@
 ```
 Google Drive（資料）
   ↓ サービスアカウントで自動取得
-Gemini gemini-embedding-001（ベクトル化）
+Vertex AI text-embedding-004（ベクトル化）
   ↓
 Supabase pgvector（保存・検索）
   ↓
-Gemini 2.0 Flash（回答生成）
+Vertex AI Gemini 2.0 Flash（回答生成）
   ↓
 Web チャット UI（ログイン後すぐ使える）
 ```
@@ -79,7 +79,7 @@ Web チャット UI（ログイン後すぐ使える）
 左メニュー → **APIs & Services → ライブラリ** で以下を有効化:
 
 - `Google Drive API`
-- `Generative Language API`（Gemini）
+- `Vertex AI API`（ライブラリ上では「Agent Platform API」と表示される場合あり。URL: `https://console.cloud.google.com/apis/library/aiplatform.googleapis.com`）
 
 ### 2-5. OAuth 2.0 クライアント（ログイン用）
 
@@ -96,13 +96,14 @@ Web チャット UI（ログイン後すぐ使える）
    （Vercel URL は後から追加でも可）
 3. 作成後に表示される **クライアント ID** と **クライアント シークレット** をメモ
 
-### 2-6. サービスアカウント（Drive 読み取り用）
+### 2-6. サービスアカウント（Drive 読み取り + Vertex AI 用）
 
 1. **IAM と管理 → サービスアカウント → サービスアカウントを作成**
-   - 名前: `drive-reader`（任意）
+   - 名前: `nutfes-rag`（任意）
 2. 作成後、サービスアカウントをクリック → **キー → キーを追加 → 新しいキーを作成 → JSON**
 3. ダウンロードした JSON ファイルを安全な場所に保存
-4. サービスアカウントのメールアドレス（`drive-reader@xxxx.iam.gserviceaccount.com`）をメモ
+4. サービスアカウントのメールアドレス（`nutfes-rag@xxxx.iam.gserviceaccount.com`）をメモ
+5. **IAM と管理 → IAM** でサービスアカウントを選択し、ロール「**Agent Platform ユーザー**」を追加
 
 ### 2-7. Google Drive フォルダをサービスアカウントと共有
 
@@ -119,13 +120,6 @@ https://drive.google.com/drive/folders/【ここがフォルダ ID】
 ```
 
 このフォルダ ID を `config/drives.json` に設定します。
-
-### 2-8. Gemini API キーの取得
-
-1. [Google AI Studio](https://aistudio.google.com) を開く（同じ Google アカウントでログイン）
-2. **API キーを取得 → API キーを作成**
-3. 先ほど作成したプロジェクト（`nutfes-rag`）を選択して生成
-4. 表示されたキーをメモ
 
 ---
 
@@ -185,8 +179,8 @@ NEXTAUTH_URL=http://localhost:3000
 # 許可するメールアドレスのサフィックス
 ALLOWED_EMAIL_SUFFIX=.nutfes@gmail.com
 
-# Gemini API キー── 2-8 で取得
-GEMINI_API_KEY=
+# Google Cloud プロジェクト ID── Cloud Console 上部に表示される ID
+GOOGLE_CLOUD_PROJECT=
 
 # Supabase── 3-3 で取得
 SUPABASE_URL=
@@ -295,7 +289,7 @@ SYNC_TYPES=docs npm run sync
 | `NEXTAUTH_SECRET` | ランダム文字列 | `openssl rand -base64 32` |
 | `NEXTAUTH_URL` | `https://あなたのURL.vercel.app` | デプロイ後に確定 |
 | `ALLOWED_EMAIL_SUFFIX` | `.nutfes@gmail.com` | |
-| `GEMINI_API_KEY` | Gemini の API キー | 2-8 |
+| `GOOGLE_CLOUD_PROJECT` | Cloud プロジェクト ID | 2-1（例: `nutfes-rag-497501`）|
 | `SUPABASE_URL` | Supabase の Project URL | 3-3 |
 | `SUPABASE_SERVICE_KEY` | Supabase の service_role キー | 3-3 |
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | サービスアカウント JSON の中身 | 2-6（複数行 OK）|
@@ -335,7 +329,7 @@ GitHub リポジトリ → **Settings → Secrets and variables → Actions → 
 
 | Secret 名 | 値 |
 |----------|----|
-| `GEMINI_API_KEY` | Gemini の API キー |
+| `GOOGLE_CLOUD_PROJECT` | Cloud プロジェクト ID（例: `nutfes-rag-497501`）|
 | `SUPABASE_URL` | Supabase の Project URL |
 | `SUPABASE_SERVICE_KEY` | Supabase の service_role キー |
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | サービスアカウント JSON の中身 |
@@ -397,7 +391,7 @@ Google アカウントを変更したとき（例: 新しい Cloud アカウン�
 | 項目 | 更新箇所 |
 |-----|---------|
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | `.env.local` / Vercel 環境変数 |
-| `GEMINI_API_KEY` | `.env.local` / Vercel 環境変数 / GitHub Secrets |
+| `GOOGLE_CLOUD_PROJECT` | `.env.local` / Vercel 環境変数 / GitHub Secrets |
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | `.env.local` / Vercel 環境変数 / GitHub Secrets |
 | Google Drive フォルダの共有設定 | 新サービスアカウントのメールで再共有 |
 | Google OAuth のリダイレクト URI | 新プロジェクトの認証情報に Vercel URL を追加 |

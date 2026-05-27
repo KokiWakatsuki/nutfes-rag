@@ -1,6 +1,10 @@
 import { google } from "googleapis";
 import { PDFParse } from "pdf-parse";
 import { extractFileContent as geminiExtract } from "./gemini";
+import officeParser from "officeparser";
+import { writeFileSync, unlinkSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 
 // Google Workspace → Drive export API
 const EXPORTABLE_MIME_TYPES: Record<string, string> = {
@@ -9,7 +13,27 @@ const EXPORTABLE_MIME_TYPES: Record<string, string> = {
   "application/vnd.google-apps.presentation": "text/plain",
 };
 
-// Gemini でテキスト抽出するファイル種別（スキャンPDF含む）
+// MIME タイプ → 拡張子マッピング（officeparser の一時ファイル処理用）
+const MIME_TO_EXT: Record<string, string> = {
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+  "application/msword": "doc",
+  "application/vnd.ms-excel": "xls",
+  "application/vnd.ms-powerpoint": "ppt",
+};
+
+// officeparser でテキスト抽出する Office ファイル種別（Vertex AI 非対応）
+const OFFICE_EXTRACT_TYPES = new Set([
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/msword",
+  "application/vnd.ms-excel",
+  "application/vnd.ms-powerpoint",
+]);
+
+// Gemini でテキスト抽出するファイル種別（PDF・画像のみ）
 export const GEMINI_EXTRACT_TYPES = new Set([
   "application/pdf",
   "image/jpeg",
@@ -18,12 +42,6 @@ export const GEMINI_EXTRACT_TYPES = new Set([
   "image/webp",
   "image/heic",
   "image/heif",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  "application/msword",
-  "application/vnd.ms-excel",
-  "application/vnd.ms-powerpoint",
 ]);
 
 // 直接ダウンロードできるテキスト系ファイル
@@ -39,6 +57,7 @@ const TEXT_DOWNLOAD_TYPES = new Set([
 export const ALL_MIME_TYPES = new Set([
   ...Object.keys(EXPORTABLE_MIME_TYPES),
   ...GEMINI_EXTRACT_TYPES,
+  ...OFFICE_EXTRACT_TYPES,
   ...TEXT_DOWNLOAD_TYPES,
 ]);
 
@@ -77,13 +96,17 @@ function getEnabledMimeTypes(): Set<string> {
   return SYNC_TYPES_FILTER[key] ?? ALL_MIME_TYPES;
 }
 
+let _driveAuth: InstanceType<typeof google.auth.GoogleAuth> | null = null;
+
 function getAuthClient() {
-  const keyJson = process.env.GOOGLE_SERVICE_ACCOUNT_KEY!;
-  const credentials = JSON.parse(keyJson);
-  return new google.auth.GoogleAuth({
-    credentials,
-    scopes: ["https://www.googleapis.com/auth/drive.readonly"],
-  });
+  if (!_driveAuth) {
+    const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY!);
+    _driveAuth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: ["https://www.googleapis.com/auth/drive.readonly"],
+    });
+  }
+  return _driveAuth;
 }
 
 export interface DriveFile {
@@ -96,38 +119,116 @@ export interface DriveFile {
 export async function listAllFiles(folderId: string): Promise<DriveFile[]> {
   const auth = getAuthClient();
   const drive = google.drive({ version: "v3", auth });
+  const enabledTypes = getEnabledMimeTypes();
+
+  // Shared Drive ID かどうかを確認し、一括取得を試みる
+  try {
+    await drive.drives.get({ driveId: folderId });
+    // Shared Drive ID が確認できた → driveId 指定で全件フラット取得
+    return await listAllFilesFlat(drive, folderId, enabledTypes);
+  } catch {
+    // Shared Drive ID ではない（サブフォルダ等）→ 並列再帰にフォールバック
+    process.stdout.write("  サブフォルダ指定のため並列再帰探索を使用\n");
+    return await listAllFilesParallel(drive, folderId, enabledTypes);
+  }
+}
+
+// Shared Drive 全体を一括取得（フォルダ再帰不要）
+async function listAllFilesFlat(
+  drive: ReturnType<typeof google.drive>,
+  driveId: string,
+  enabledTypes: Set<string>
+): Promise<DriveFile[]> {
   const files: DriveFile[] = [];
+  let pageToken: string | undefined;
+  let page = 0;
 
-  async function listFolder(parentId: string) {
-    let pageToken: string | undefined;
-    do {
-      const res = await drive.files.list({
-        q: `'${parentId}' in parents and trashed = false`,
-        includeItemsFromAllDrives: true,
-        supportsAllDrives: true,
-        fields: "nextPageToken, files(id, name, mimeType, modifiedTime)",
-        pageToken,
-        pageSize: 1000,
-      });
+  do {
+    const res = await drive.files.list({
+      corpora: "drive",
+      driveId,
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+      q: "trashed = false and mimeType != 'application/vnd.google-apps.folder'",
+      fields: "nextPageToken, files(id, name, mimeType, modifiedTime)",
+      pageSize: 1000,
+      pageToken,
+    });
 
-      for (const f of res.data.files ?? []) {
-        if (!f.id || !f.name || !f.mimeType) continue;
-        if (f.mimeType === "application/vnd.google-apps.folder") {
-          await listFolder(f.id);
-        } else if (getEnabledMimeTypes().has(f.mimeType)) {
-          files.push({
-            id: f.id,
-            name: f.name,
-            mimeType: f.mimeType,
-            modifiedTime: f.modifiedTime ?? "",
-          });
-        }
+    page++;
+    for (const f of res.data.files ?? []) {
+      if (!f.id || !f.name || !f.mimeType) continue;
+      if (enabledTypes.has(f.mimeType)) {
+        files.push({
+          id: f.id,
+          name: f.name,
+          mimeType: f.mimeType,
+          modifiedTime: f.modifiedTime ?? "",
+        });
       }
-      pageToken = res.data.nextPageToken ?? undefined;
-    } while (pageToken);
+    }
+
+    pageToken = res.data.nextPageToken ?? undefined;
+    process.stdout.write(`  ページ ${page} 取得完了: 計 ${files.length} 件\n`);
+  } while (pageToken);
+
+  return files;
+}
+
+// フォルダIDが Shared Drive ルートでない場合の並列再帰探索
+async function listAllFilesParallel(
+  drive: ReturnType<typeof google.drive>,
+  rootId: string,
+  enabledTypes: Set<string>
+): Promise<DriveFile[]> {
+  const files: DriveFile[] = [];
+  const folderQueue: string[] = [rootId];
+  let folderCount = 0;
+  const FOLDER_CONCURRENCY = 10;
+
+  async function processQueue() {
+    while (folderQueue.length > 0) {
+      const parentId = folderQueue.shift();
+      if (!parentId) continue;
+      folderCount++;
+      if (folderCount % 20 === 0) {
+        process.stdout.write(`  フォルダ探索中: ${folderCount} フォルダ目, ファイル ${files.length} 件\n`);
+      }
+
+      let pageToken: string | undefined;
+      do {
+        const res = await drive.files.list({
+          q: `'${parentId}' in parents and trashed = false`,
+          includeItemsFromAllDrives: true,
+          supportsAllDrives: true,
+          fields: "nextPageToken, files(id, name, mimeType, modifiedTime)",
+          pageToken,
+          pageSize: 1000,
+        });
+
+        for (const f of res.data.files ?? []) {
+          if (!f.id || !f.name || !f.mimeType) continue;
+          if (f.mimeType === "application/vnd.google-apps.folder") {
+            folderQueue.push(f.id);
+          } else if (enabledTypes.has(f.mimeType)) {
+            files.push({
+              id: f.id,
+              name: f.name,
+              mimeType: f.mimeType,
+              modifiedTime: f.modifiedTime ?? "",
+            });
+          }
+        }
+        pageToken = res.data.nextPageToken ?? undefined;
+      } while (pageToken);
+    }
   }
 
-  await listFolder(folderId);
+  // キューが空になるまで並列ワーカーで消化（先に追加されたフォルダを随時処理）
+  // 単純な Promise.all では動的追加に対応できないため、ポーリング方式で制御
+  const workers = Array.from({ length: FOLDER_CONCURRENCY }, () => processQueue());
+  await Promise.all(workers);
+
   return files;
 }
 
@@ -157,7 +258,27 @@ export async function fetchFileContent(
     return Buffer.from(res.data as ArrayBuffer).toString("utf-8");
   }
 
-  // バイナリ系（PDF・画像・Office）→ バイナリダウンロード後に処理
+  // Office ファイル → officeparser でテキスト抽出（Vertex AI は非対応）
+  if (OFFICE_EXTRACT_TYPES.has(mimeType)) {
+    const res = await drive.files.get(
+      { fileId, alt: "media" },
+      { responseType: "arraybuffer" }
+    );
+    const buf = Buffer.from(res.data as ArrayBuffer);
+    // officeparser はバッファのみでは形式を判別できない場合があるため
+    // 拡張子付きの一時ファイルに書き出して処理する
+    const ext = MIME_TO_EXT[mimeType] ?? "bin";
+    const tmpPath = join(tmpdir(), `office-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`);
+    writeFileSync(tmpPath, buf);
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return String((await (officeParser as any).parseOffice(tmpPath)) ?? "");
+    } finally {
+      unlinkSync(tmpPath);
+    }
+  }
+
+  // PDF・画像 → バイナリダウンロード後に処理
   if (GEMINI_EXTRACT_TYPES.has(mimeType)) {
     const res = await drive.files.get(
       { fileId, alt: "media" },
@@ -174,12 +295,12 @@ export async function fetchFileContent(
           return result.text;
         }
         // テキストが少ない → スキャンPDFとして Gemini に渡す
-      } catch {
-        // pdf-parse 失敗 → Gemini にフォールバック
+      } catch (_err) {
+        // pdf-parse 失敗（Unicode エラー等）→ Gemini OCR にフォールバック
       }
     }
 
-    // スキャンPDF・画像・Office: Gemini Flash でテキスト抽出
+    // スキャンPDF・画像: Gemini Flash でテキスト抽出
     return await geminiExtract(buf, mimeType);
   }
 
