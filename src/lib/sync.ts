@@ -23,6 +23,22 @@ async function sleep(ms: number) {
 // Vertex AI 429 の種別を判定
 // "daily quota exhausted" → true（abort）
 // "rate limit / resource exhausted" → false（リトライ可）
+const MIME_TO_EXT: Record<string, string> = {
+  "application/vnd.google-apps.document": ".docx",
+  "application/vnd.google-apps.spreadsheet": ".xlsx",
+  "application/vnd.google-apps.presentation": ".pptx",
+  "application/pdf": ".pdf",
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/gif": ".gif",
+  "image/webp": ".webp",
+};
+
+function displayName(name: string, mimeType: string): string {
+  if (name.includes(".")) return name;
+  return name + (MIME_TO_EXT[mimeType] ?? "");
+}
+
 function isDailyQuotaExhausted(msg: string): boolean {
   const lower = msg.toLowerCase();
   return (
@@ -73,13 +89,26 @@ async function syncDrive(
     `合計 ${files.length} 件 / 未処理 ${newFiles.length} 件 / スキップ ${files.length - newFiles.length} 件`
   );
 
+  const dbSkipped = files.length - newFiles.length;
   let processed = 0;
   let empty = 0;
   let errors = 0;
   let embedCallCount = 0;
   let nextIdx = 0;
+  let completedCount = 0;
   let aborted = false;
   let firstFile = true;
+
+  function printProgress(fileName?: string, final = false) {
+    const done = completedCount;
+    const total = newFiles.length;
+    const pct = total > 0 ? Math.round((done / total) * 100) : 100;
+    const label = final ? "完了" : "進捗";
+    const filePart = fileName ? ` ${fileName}` : "";
+    console.log(
+      `[${label}] ${done}/${total} (${pct}%)${filePart} | DB保存処理完了: ${processed} | 空/破損スキップ: ${empty} | エラー(要確認): ${errors} | DB保存済みによりスキップ: ${dbSkipped}`
+    );
+  }
 
   async function worker() {
     while (!aborted) {
@@ -87,7 +116,6 @@ async function syncDrive(
       if (i >= newFiles.length) break;
 
       const file = newFiles[i];
-      const progress = `[${i + 1}/${newFiles.length}]`;
 
       try {
         let raw: string | undefined;
@@ -102,7 +130,7 @@ async function syncDrive(
 
             if ((isNetworkTransient || isRateLimit) && attempt < 3) {
               const waitMs = isRateLimit ? 60000 : 3000 * (attempt + 1);
-              console.warn(`${progress} リトライ ${attempt + 1}/3 (${isRateLimit ? "レート制限" : "一時障害"}, ${waitMs / 1000}秒待機): ${file.name}`);
+              console.warn(`リトライ ${attempt + 1}/3 (${isRateLimit ? "レート制限" : "一時障害"}, ${waitMs / 1000}秒待機): ${file.name}`);
               await sleep(waitMs);
               continue;
             }
@@ -112,8 +140,9 @@ async function syncDrive(
         const content = raw!.replace(/\x00/g, ""); // eslint-disable-line no-control-regex
 
         if (!content.trim()) {
-          console.log(`${progress} スキップ（空）: ${file.name}`);
           empty++;
+          completedCount++;
+          printProgress(displayName(file.name, file.mimeType));
           continue;
         }
 
@@ -154,12 +183,14 @@ async function syncDrive(
         }
 
         processed++;
-        console.log(`${progress} ✓ ${file.name} (${chunks.length} チャンク)`);
+        completedCount++;
+        printProgress(displayName(file.name, file.mimeType));
       } catch (err: unknown) {
         // 破損ファイル・サイズ超過など永続的にスキップすべきエラー
         if (err instanceof GeminiSkippableError) {
-          console.warn(`${progress} スキップ（処理不可）: ${file.name} - ${err.message}`);
           empty++;
+          completedCount++;
+          printProgress(displayName(file.name, file.mimeType));
           continue;
         }
 
@@ -167,26 +198,23 @@ async function syncDrive(
           ? err.message
           : (err as { message?: string })?.message ?? String(err);
 
-        console.error(`${progress} ✗ ${file.name}: ${msg}`);
-        console.error(`   RAW ERROR:`, JSON.stringify(err, Object.getOwnPropertyNames(err instanceof Error ? err : Object(err))));
-
         // 日次クォータ超過のみ致命的エラーとして全ワーカーを停止
         if (isDailyQuotaExhausted(msg)) {
-          console.error(
-            `\n❌ API の1日の上限に達しました。明日以降に再実行してください。`
-          );
-          console.error(`   中断時点: ${i + 1}/${newFiles.length} 件処理済み`);
+          console.error(`\n❌ API の1日の上限に達しました。明日以降に再実行してください。`);
           aborted = true;
           break;
         }
         errors++;
+        completedCount++;
+        console.error(`✗ エラー(要確認): ${displayName(file.name, file.mimeType)}: ${msg}`);
+        printProgress(displayName(file.name, file.mimeType));
       }
     }
   }
 
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
-  console.log(`  → 処理済み ${processed} / 空 ${empty} / エラー ${errors} / スキップ（DB済み） ${files.length - newFiles.length}`);
+  printProgress(undefined, true);
   return {
     processed,
     skipped: files.length - newFiles.length,
