@@ -138,7 +138,8 @@ async function renderPdfToJpegs(pdfBuffer: Buffer): Promise<Buffer[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { getDocument, GlobalWorkerOptions } = await import("pdfjs-dist/legacy/build/pdf.mjs") as any;
   const { createCanvas } = await import("canvas");
-  GlobalWorkerOptions.workerSrc = "";
+  // pdf-parse も pdfjs-dist を依存に持つため workerSrc を明示指定してバージョン不一致を防ぐ
+  GlobalWorkerOptions.workerSrc = `file://${process.cwd()}/node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs`;
 
   const pdfDoc = await getDocument({ data: new Uint8Array(pdfBuffer) }).promise;
   const numPages: number = pdfDoc.numPages;
