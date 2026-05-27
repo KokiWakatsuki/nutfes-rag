@@ -133,6 +133,38 @@ async function uploadToGcsAndExtract(
   }
 }
 
+// GCS上限超えチャンクをJPEGに変換してGemini OCR（pdfjs-dist + canvas）
+async function renderPdfToJpegs(pdfBuffer: Buffer): Promise<Buffer[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { getDocument, GlobalWorkerOptions } = await import("pdfjs-dist/legacy/build/pdf.mjs") as any;
+  const { createCanvas } = await import("canvas");
+  GlobalWorkerOptions.workerSrc = "";
+
+  const pdfDoc = await getDocument({ data: new Uint8Array(pdfBuffer) }).promise;
+  const numPages: number = pdfDoc.numPages;
+  const images: Buffer[] = [];
+
+  for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+    const page = await pdfDoc.getPage(pageNum);
+    // scale=2.0 ≈ 144 DPI: OCRに十分な解像度で20MB以内に収まる
+    let scale = 2.0;
+    let jpeg: Buffer;
+    do {
+      const viewport = page.getViewport({ scale });
+      const canvas = createCanvas(Math.floor(viewport.width), Math.floor(viewport.height));
+      await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+      jpeg = canvas.toBuffer("image/jpeg", { quality: 0.85 }) as Buffer;
+      if (jpeg.length > GEMINI_INLINE_LIMIT) scale -= 0.5;
+    } while (jpeg!.length > GEMINI_INLINE_LIMIT && scale > 0.5);
+
+    process.stdout.write(`    → p${pageNum}/${numPages} JPEG ${(jpeg!.length / 1024 / 1024).toFixed(1)}MB (scale=${scale})\n`);
+    images.push(jpeg!);
+  }
+
+  await pdfDoc.destroy();
+  return images;
+}
+
 // PDFをページ単位で分割してGeminiに送り、結果を結合する
 async function extractLargePdf(buffer: Buffer, storage: Storage): Promise<string> {
   const pdfDoc = await PDFDocument.load(buffer, { ignoreEncryption: true });
@@ -154,6 +186,23 @@ async function extractLargePdf(buffer: Buffer, storage: Storage): Promise<string
     const pages = await chunk.copyPages(pdfDoc, pageIndices);
     pages.forEach((p: ReturnType<typeof chunk.addPage>) => chunk.addPage(p));
     const chunkBytes = Buffer.from(await chunk.save());
+
+    if (chunkBytes.length > GCS_PDF_LIMIT) {
+      // 1ページが巨大な高解像度PDF → JPEG変換して画像としてOCR
+      process.stdout.write(
+        `  チャンク(p${start + 1}-${end}) ${(chunkBytes.length / 1024 / 1024).toFixed(1)}MB > GCS上限 → JPEG変換してOCR\n`
+      );
+      const jpegs = await renderPdfToJpegs(chunkBytes);
+      for (const jpeg of jpegs) {
+        const text = await geminiGenerateContent([
+          { inlineData: { mimeType: "image/jpeg", data: jpeg.toString("base64") } },
+          { text: OCR_PROMPT },
+        ]);
+        if (text.trim()) results.push(text.trim());
+      }
+      continue;
+    }
+
     const text = await uploadToGcsAndExtract(storage, chunkBytes, "application/pdf");
     if (text.trim()) results.push(text.trim());
   }
