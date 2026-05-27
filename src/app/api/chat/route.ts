@@ -11,12 +11,53 @@ import {
 
 export const maxDuration = 300;
 
+// インスタンス内レート制限（20回/分/ユーザー）
+const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT_MAX = 20;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+
+function isRateLimited(email: string): boolean {
+  const now = Date.now();
+  const record = rateLimitStore.get(email);
+  if (!record || now > record.resetAt) {
+    rateLimitStore.set(email, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return false;
+  }
+  if (record.count >= RATE_LIMIT_MAX) return true;
+  record.count++;
+  return false;
+}
+
+// セッション管理・会話履歴取得（embedding 生成と並列実行するための関数）
+async function setupSession(
+  userEmail: string,
+  sessionId: string | null,
+  question: string,
+  filterEditions: number[] | null
+): Promise<{ sessionId: string; history: Array<{ role: "user" | "assistant"; content: string }> }> {
+  if (!sessionId) {
+    const title = question.length > 40 ? question.slice(0, 40) + "…" : question;
+    const newSession = await createChatSession(userEmail, title, filterEditions);
+    return { sessionId: newSession.id, history: [] };
+  }
+  const [sessionData] = await Promise.all([
+    getChatSession(sessionId, userEmail),
+    touchChatSession(sessionId),
+  ]);
+  const history = sessionData?.messages.map((m) => ({ role: m.role, content: m.content })) ?? [];
+  return { sessionId, history };
+}
+
 export async function POST(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   const userEmail = session.user.email;
+
+  if (isRateLimited(userEmail)) {
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
 
   const { question, editions, sessionId } = await req.json();
   if (!question || typeof question !== "string") {
@@ -26,28 +67,17 @@ export async function POST(req: NextRequest) {
   const filterEditions: number[] | null =
     Array.isArray(editions) && editions.length > 0 ? editions : null;
 
-  // セッション管理・会話履歴取得
-  let currentSessionId: string = sessionId ?? null;
-  let history: Array<{ role: "user" | "assistant"; content: string }> = [];
+  // セッション管理と埋め込み生成を並列実行
+  const [{ sessionId: currentSessionId, history }, embedding] = await Promise.all([
+    setupSession(userEmail, sessionId ?? null, question, filterEditions),
+    generateEmbedding(question),
+  ]);
 
-  if (!currentSessionId) {
-    const title = question.length > 40 ? question.slice(0, 40) + "…" : question;
-    const newSession = await createChatSession(userEmail, title, filterEditions);
-    currentSessionId = newSession.id;
-  } else {
-    const [sessionData] = await Promise.all([
-      getChatSession(currentSessionId, userEmail),
-      touchChatSession(currentSessionId),
-    ]);
-    if (sessionData) {
-      history = sessionData.messages.map((m) => ({ role: m.role, content: m.content }));
-    }
-  }
-
-  await saveChatMessage(currentSessionId, "user", question, []);
-
-  const embedding = await generateEmbedding(question);
-  const docs = await searchDocuments(embedding, filterEditions, 8, question);
+  // ユーザーメッセージ保存と文書検索を並列実行
+  const [, docs] = await Promise.all([
+    saveChatMessage(currentSessionId, "user", question, []),
+    searchDocuments(embedding, filterEditions, 8, question),
+  ]);
 
   // ファイルIDでソース重複排除
   const seenFileIds = new Set<string>();
@@ -67,7 +97,6 @@ export async function POST(req: NextRequest) {
       const send = (data: object) =>
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
 
-      // ソースとセッションIDをまず送信
       send({ type: "meta", sessionId: sid, sources });
 
       let fullText = "";
@@ -86,7 +115,12 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      await saveChatMessage(sid, "assistant", fullText || "エラーが発生しました。", sources);
+      try {
+        await saveChatMessage(sid, "assistant", fullText || "エラーが発生しました。", sources);
+      } catch (saveErr) {
+        console.error("Failed to save assistant message:", saveErr);
+      }
+
       send({ type: "done" });
       controller.close();
     },

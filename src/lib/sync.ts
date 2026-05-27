@@ -1,7 +1,7 @@
 import drives from "../../config/drives.json";
 import { listAllFiles, fetchFileContent, chunkText } from "./drive";
 import { generateEmbeddingBatch, GeminiSkippableError } from "./gemini";
-import { upsertDocument, getIndexedFiles, deleteChunksByFileId } from "./supabase";
+import { upsertDocument, getIndexedFiles, deleteStaleChunks } from "./supabase";
 
 export interface SyncResult {
   processed: number;
@@ -180,11 +180,7 @@ async function syncDrive(
           embeddings.push(...batchEmbeddings);
         }
 
-        // 再インデックス時: 古いチャンクを全削除してから再投入（チャンク数減少時のゴミ防止）
-        if (indexedFiles.has(file.id)) {
-          await deleteChunksByFileId(file.id);
-        }
-
+        // upsert → stale削除の順（逆順だとクラッシュ時にデータ消失するため）
         for (let j = 0; j < chunks.length; j++) {
           await upsertDocument({
             file_id: file.id,
@@ -196,6 +192,10 @@ async function syncDrive(
             drive_modified_at: file.modifiedTime || undefined,
             embedding: embeddings[j],
           });
+        }
+        // 旧ファイルがより多くのチャンクを持っていた場合、余分なチャンクを削除
+        if (indexedFiles.has(file.id)) {
+          await deleteStaleChunks(file.id, chunks.length - 1);
         }
 
         processed++;

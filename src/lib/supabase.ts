@@ -64,11 +64,13 @@ export async function searchDocuments(
   return data ?? [];
 }
 
-export async function deleteChunksByFileId(fileId: string): Promise<void> {
+// maxChunkIndex より大きいインデックスのチャンクを削除（ファイル縮小時のゴミ防止）
+export async function deleteStaleChunks(fileId: string, maxChunkIndex: number): Promise<void> {
   const { error } = await getSupabase()
     .from("documents")
     .delete()
-    .eq("file_id", fileId);
+    .eq("file_id", fileId)
+    .gt("chunk_index", maxChunkIndex);
   if (error) throw error;
 }
 

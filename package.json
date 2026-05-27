@@ -9,7 +9,9 @@
     "lint": "next lint",
     "sync": "tsx --env-file=.env.local scripts/sync.ts",
     "sync:ci": "tsx scripts/sync.ts",
-    "estimate": "tsx --env-file=.env.local scripts/estimate.ts"
+    "estimate": "tsx --env-file=.env.local scripts/estimate.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "repository": {
     "type": "git",
@@ -41,6 +43,7 @@
     "@types/react-dom": "^19.2.3",
     "postcss": "^8.5.15",
     "tailwindcss": "^4.3.0",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
   }
 }
