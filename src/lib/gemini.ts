@@ -9,6 +9,10 @@ const EMBED_MODEL = "text-embedding-004";
 const CHAT_MODEL = "gemini-2.5-flash";
 const EMBEDDING_DIMENSIONS = 768;
 const GEMINI_INLINE_LIMIT = 20 * 1024 * 1024;
+// 1リクエストあたりの安全処理サイズ: ~1MB/s想定で90s以内に収まるよう10MBに設定
+const PDF_SAFE_CHUNK_SIZE = 10 * 1024 * 1024;
+// Gemini OCR 1リクエストのタイムアウト
+const GEMINI_OCR_TIMEOUT_MS = 90_000;
 
 let _auth: InstanceType<typeof google.auth.GoogleAuth> | null = null;
 
@@ -74,13 +78,26 @@ export class GeminiSkippableError extends Error {
 
 async function geminiGenerateContent(parts: object[]): Promise<string> {
   const token = await getAccessToken();
-  const res = await fetch(vertexUrl(CHAT_MODEL, "generateContent"), {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts }],
-    }),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GEMINI_OCR_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(vertexUrl(CHAT_MODEL, "generateContent"), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts }],
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`Gemini OCR timeout after ${GEMINI_OCR_TIMEOUT_MS / 1000}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     const err = await res.text();
     // 破損ファイル・サイズ超過は永続的エラー → スキップ可能として扱う
@@ -116,15 +133,17 @@ async function uploadToGcsAndExtract(
   }
 }
 
-// 大きいPDFをページ単位で分割してGeminiに送り、結果を結合する
+// PDFをページ単位で分割してGeminiに送り、結果を結合する
 async function extractLargePdf(buffer: Buffer, storage: Storage): Promise<string> {
   const pdfDoc = await PDFDocument.load(buffer, { ignoreEncryption: true });
   const totalPages = pdfDoc.getPageCount();
   const bytesPerPage = Math.max(1, buffer.length / totalPages);
-  const pagesPerChunk = Math.max(1, Math.floor((GCS_PDF_LIMIT * 0.8) / bytesPerPage));
+  // PDF_SAFE_CHUNK_SIZE ベースでチャンク数を決定（GCS上限50MBも超えない）
+  const safeChunkSize = Math.min(PDF_SAFE_CHUNK_SIZE, GCS_PDF_LIMIT * 0.9);
+  const pagesPerChunk = Math.max(1, Math.floor(safeChunkSize / bytesPerPage));
 
   process.stdout.write(
-    `  PDF分割: ${totalPages}ページ / ${(buffer.length / 1024 / 1024).toFixed(1)}MB → ${Math.ceil(totalPages / pagesPerChunk)}チャンクに分割\n`
+    `  PDF分割: ${totalPages}ページ / ${(buffer.length / 1024 / 1024).toFixed(1)}MB → ${Math.ceil(totalPages / pagesPerChunk)}チャンク (上限${(safeChunkSize / 1024 / 1024).toFixed(0)}MB/チャンク)\n`
   );
 
   const results: string[] = [];
@@ -145,6 +164,19 @@ export async function extractFileContent(
   buffer: Buffer,
   mimeType: string
 ): Promise<string> {
+  // PDFは PDF_SAFE_CHUNK_SIZE 超でプロアクティブ分割（タイムアウト防止）
+  if (mimeType === "application/pdf" && buffer.length > PDF_SAFE_CHUNK_SIZE) {
+    if (!GCS_BUCKET) {
+      throw new Error(
+        `PDF分割にはGCSが必要です (${(buffer.length / 1024 / 1024).toFixed(1)} MB > ${PDF_SAFE_CHUNK_SIZE / 1024 / 1024} MB)。GCS_BUCKET を設定してください。`
+      );
+    }
+    const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY!);
+    const storage = new Storage({ credentials, projectId: PROJECT });
+    return extractLargePdf(buffer, storage);
+  }
+
+  // PDF以外・小サイズPDF: 20MB 以下はインライン送信
   if (buffer.length <= GEMINI_INLINE_LIMIT) {
     return geminiGenerateContent([
       { inlineData: { mimeType, data: buffer.toString("base64") } },
@@ -152,7 +184,7 @@ export async function extractFileContent(
     ]);
   }
 
-  // 20MB 超 → GCS 経由
+  // 20MB 超の非PDF → GCS 経由（単一リクエスト、90sタイムアウト内に収まる想定）
   if (!GCS_BUCKET) {
     throw new Error(
       `ファイルサイズ超過 (${(buffer.length / 1024 / 1024).toFixed(1)} MB > 20 MB)。GCS_BUCKET を設定してください。`
@@ -160,12 +192,6 @@ export async function extractFileContent(
   }
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY!);
   const storage = new Storage({ credentials, projectId: PROJECT });
-
-  // PDF が 50MB 超 → ページ分割して処理
-  if (mimeType === "application/pdf" && buffer.length > GCS_PDF_LIMIT) {
-    return extractLargePdf(buffer, storage);
-  }
-
   return uploadToGcsAndExtract(storage, buffer, mimeType);
 }
 
