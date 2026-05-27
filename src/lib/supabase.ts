@@ -75,13 +75,6 @@ export async function upsertDocument(doc: {
   if (error) throw error;
 }
 
-export async function deleteDocumentsByDriveId(driveId: string): Promise<void> {
-  const { error } = await getSupabase()
-    .from("documents")
-    .delete()
-    .eq("drive_id", driveId);
-  if (error) throw error;
-}
 
 // file_id → drive_modified_at (null if unknown) のマップを返す
 export async function getIndexedFiles(driveId: string): Promise<Map<string, string | null>> {

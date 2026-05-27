@@ -15,12 +15,6 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     signIn({ profile }) {
       return profile?.email?.endsWith(ALLOWED_SUFFIX) ?? false;
     },
-    session({ session, token }) {
-      return session;
-    },
-    jwt({ token, profile }) {
-      return token;
-    },
   },
   pages: {
     signIn: "/",
