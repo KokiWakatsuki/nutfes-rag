@@ -7,7 +7,7 @@
 
 import { google } from "googleapis";
 import drives from "../config/drives.json";
-import { getIndexedFileIds } from "../src/lib/supabase";
+import { getIndexedFiles } from "../src/lib/supabase";
 
 const MIME = {
   DOC:   "application/vnd.google-apps.document",
@@ -154,7 +154,8 @@ async function main() {
   for (const { edition, driveId } of drives) {
     console.log(`\n【第${edition}回】スキャン中... (. = サブフォルダ発見)`);
     const files = await collectFiles(driveId);
-    const indexedIds = new Set(await getIndexedFileIds(driveId));
+    const indexedMap = await getIndexedFiles(driveId);
+    const indexedIds = new Set<string>(indexedMap.keys());
     allFilesByDrive.push({ edition, driveId, files, indexedIds });
     console.log(` → ${files.length} 件（処理済み: ${indexedIds.size} 件）`);
   }

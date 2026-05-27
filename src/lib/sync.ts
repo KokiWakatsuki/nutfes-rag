@@ -1,7 +1,7 @@
 import drives from "../../config/drives.json";
 import { listAllFiles, fetchFileContent, chunkText } from "./drive";
 import { generateEmbeddingBatch, GeminiSkippableError } from "./gemini";
-import { upsertDocument, getIndexedFileIds } from "./supabase";
+import { upsertDocument, getIndexedFiles } from "./supabase";
 
 export interface SyncResult {
   processed: number;
@@ -82,11 +82,18 @@ async function syncDrive(
 ): Promise<SyncResult> {
   console.log("ファイル一覧を取得中...");
   const files = await listAllFiles(driveId);
-  const indexedIds = new Set(await getIndexedFileIds(driveId));
+  const indexedFiles = await getIndexedFiles(driveId);
 
-  const newFiles = files.filter((f) => !indexedIds.has(f.id));
+  // 未indexまたは更新済みファイルを処理対象とする
+  const newFiles = files.filter((f) => {
+    const storedModifiedAt = indexedFiles.get(f.id);
+    if (storedModifiedAt === undefined) return true; // 未index
+    if (storedModifiedAt === null) return false; // modifiedTime不明→スキップしない（既存データ保持）
+    return f.modifiedTime > storedModifiedAt; // Drive更新日時が新しければ再index
+  });
+  const updatedCount = newFiles.filter((f) => indexedFiles.has(f.id)).length;
   console.log(
-    `合計 ${files.length} 件 / 未処理 ${newFiles.length} 件 / スキップ ${files.length - newFiles.length} 件`
+    `合計 ${files.length} 件 / 未処理 ${newFiles.length - updatedCount} 件 / 更新再index ${updatedCount} 件 / スキップ ${files.length - newFiles.length} 件`
   );
 
   const dbSkipped = files.length - newFiles.length;
@@ -181,6 +188,7 @@ async function syncDrive(
             content: chunks[j],
             edition,
             drive_id: driveId,
+            drive_modified_at: file.modifiedTime || undefined,
             embedding: embeddings[j],
           });
         }

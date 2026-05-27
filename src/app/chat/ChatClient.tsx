@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface Source {
   fileName: string;
@@ -369,8 +371,17 @@ export default function ChatClient({
                         : "bg-white border border-gray-200 text-gray-800 shadow-sm rounded-bl-sm"
                     }`}
                   >
-                    <p className="whitespace-pre-wrap">{msg.content}</p>
+                    {msg.role === "assistant" ? (
+                      <div className="prose prose-sm max-w-none prose-headings:font-semibold prose-headings:text-gray-800 prose-p:text-gray-800 prose-li:text-gray-800 prose-table:text-sm prose-code:text-pink-600 prose-code:bg-gray-100 prose-code:rounded prose-code:px-1 prose-pre:bg-gray-100 prose-pre:rounded-lg">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                      </div>
+                    ) : (
+                      <p className="whitespace-pre-wrap">{msg.content}</p>
+                    )}
                   </div>
+                  {msg.role === "assistant" && (
+                    <CopyButton text={msg.content} />
+                  )}
                   {msg.sources && msg.sources.length > 0 && (
                     <div className="flex flex-wrap gap-1 px-1">
                       {msg.sources.map((s, j) => (
@@ -436,5 +447,23 @@ export default function ChatClient({
         </div>
       </div>
     </div>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+  return (
+    <button
+      onClick={copy}
+      className="text-xs text-gray-400 hover:text-gray-600 transition-colors px-1 py-0.5"
+      title="コピー"
+    >
+      {copied ? "コピー済み" : "コピー"}
+    </button>
   );
 }

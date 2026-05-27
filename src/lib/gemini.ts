@@ -47,7 +47,6 @@ function vertexUrl(model: string, method: string): string {
   return `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${PROJECT}/locations/${LOCATION}/publishers/google/models/${model}:${method}`;
 }
 
-
 export async function generateEmbedding(text: string): Promise<number[]> {
   const [embedding] = await generateEmbeddingBatch([text]);
   return embedding;
@@ -107,9 +106,8 @@ async function geminiGenerateContent(parts: object[]): Promise<string> {
   }
   if (!res.ok) {
     const err = await res.text();
-    // 破損ファイル・サイズ超過は永続的エラー → スキップ可能として扱う
+    // 破損ファイル・暗号化・サイズ超過など永続的に処理不能なケース
     if (res.status === 400) {
-      // ファイル破損・暗号化・サイズ超過など永続的に処理不能なケース
       const skipPatterns = ["not valid", "no pages", "Invalid PDF", "encrypted", "password", "INVALID_ARGUMENT"];
       if (skipPatterns.some((p) => err.includes(p))) {
         throw new GeminiSkippableError(`Gemini OCR skippable: ${err.slice(0, 200)}`);
@@ -123,7 +121,7 @@ async function geminiGenerateContent(parts: object[]): Promise<string> {
   return data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
 }
 
-const GCS_PDF_LIMIT = 50 * 1024 * 1024; // Gemini GCS PDF 上限 50MB
+const GCS_PDF_LIMIT = 50 * 1024 * 1024;
 
 async function uploadToGcsAndExtract(
   storage: Storage,
@@ -149,7 +147,6 @@ async function renderPdfToJpegs(pdfBuffer: Buffer): Promise<Buffer[]> {
   const tmpPrefix = join(tmpdir(), `pdfocr-${uid}`);
   writeFileSync(tmpPdf, pdfBuffer);
   try {
-    // 150 DPI JPEG: OCRに十分で20MB以内に収まる
     await execFileAsync("gs", [
       "-dNOPAUSE", "-dBATCH", "-dSAFER",
       "-sDEVICE=jpeg", "-r150", "-dJPEGQ=90",
@@ -178,7 +175,6 @@ async function extractLargePdf(buffer: Buffer, storage: Storage): Promise<string
   const pdfDoc = await PDFDocument.load(buffer, { ignoreEncryption: true });
   const totalPages = pdfDoc.getPageCount();
   const bytesPerPage = Math.max(1, buffer.length / totalPages);
-  // PDF_SAFE_CHUNK_SIZE ベースでチャンク数を決定（GCS上限50MBも超えない）
   const safeChunkSize = Math.min(PDF_SAFE_CHUNK_SIZE, GCS_PDF_LIMIT * 0.9);
   const pagesPerChunk = Math.max(1, Math.floor(safeChunkSize / bytesPerPage));
 
@@ -196,7 +192,6 @@ async function extractLargePdf(buffer: Buffer, storage: Storage): Promise<string
     const chunkBytes = Buffer.from(await chunk.save());
 
     if (chunkBytes.length > GCS_PDF_LIMIT) {
-      // 1ページが巨大な高解像度PDF → JPEG変換して画像としてOCR
       process.stdout.write(
         `  チャンク(p${start + 1}-${end}) ${(chunkBytes.length / 1024 / 1024).toFixed(1)}MB > GCS上限 → JPEG変換してOCR\n`
       );
@@ -221,7 +216,6 @@ export async function extractFileContent(
   buffer: Buffer,
   mimeType: string
 ): Promise<string> {
-  // PDFは PDF_SAFE_CHUNK_SIZE 超でプロアクティブ分割（タイムアウト防止）
   if (mimeType === "application/pdf" && buffer.length > PDF_SAFE_CHUNK_SIZE) {
     if (!GCS_BUCKET) {
       throw new Error(
@@ -233,7 +227,6 @@ export async function extractFileContent(
     return extractLargePdf(buffer, storage);
   }
 
-  // PDF以外・小サイズPDF: 20MB 以下はインライン送信
   if (buffer.length <= GEMINI_INLINE_LIMIT) {
     return geminiGenerateContent([
       { inlineData: { mimeType, data: buffer.toString("base64") } },
@@ -241,7 +234,6 @@ export async function extractFileContent(
     ]);
   }
 
-  // 20MB 超の非PDF → GCS 経由（単一リクエスト、90sタイムアウト内に収まる想定）
   if (!GCS_BUCKET) {
     throw new Error(
       `ファイルサイズ超過 (${(buffer.length / 1024 / 1024).toFixed(1)} MB > 20 MB)。GCS_BUCKET を設定してください。`
@@ -254,7 +246,8 @@ export async function extractFileContent(
 
 export async function generateAnswer(
   question: string,
-  contexts: Array<{ file_name: string; content: string; edition: number }>
+  contexts: Array<{ file_name: string; content: string; edition: number }>,
+  history: Array<{ role: "user" | "assistant"; content: string }> = []
 ): Promise<string> {
   const token = await getAccessToken();
   const contextText = contexts
@@ -264,23 +257,30 @@ export async function generateAnswer(
     )
     .join("\n\n---\n\n");
 
-  const prompt = `あなたは学祭実行委員のAIアシスタントです。
-以下の資料を参考にして、質問に日本語で答えてください。
+  const systemInstruction = `あなたは学祭実行委員のAIアシスタントです。
+以下の参考資料を使って、質問に日本語で正確に答えてください。
+回答はMarkdown形式で、見出し・箇条書き・表などを適切に使って読みやすく整形してください。
 資料に記載されていない内容については「資料には記載がありません」と明示してください。
+前の会話の内容も考慮して回答してください。
 
 【参考資料】
-${contextText}
+${contextText}`;
 
-【質問】
-${question}
-
-【回答】`;
+  // 直近6件（3往復）の会話履歴を含める
+  const contents = [
+    ...history.slice(-6).map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }],
+    })),
+    { role: "user", parts: [{ text: question }] },
+  ];
 
   const res = await fetch(vertexUrl(CHAT_MODEL, "generateContent"), {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      systemInstruction: { parts: [{ text: systemInstruction }] },
+      contents,
     }),
   });
   if (!res.ok) {

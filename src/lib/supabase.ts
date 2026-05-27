@@ -19,6 +19,7 @@ export interface Document {
   content: string;
   edition: number;
   drive_id: string;
+  drive_modified_at?: string;
   embedding?: number[];
   created_at: string;
   updated_at: string;
@@ -65,6 +66,7 @@ export async function upsertDocument(doc: {
   content: string;
   edition: number;
   drive_id: string;
+  drive_modified_at?: string;
   embedding: number[];
 }): Promise<void> {
   const { error } = await getSupabase()
@@ -81,23 +83,28 @@ export async function deleteDocumentsByDriveId(driveId: string): Promise<void> {
   if (error) throw error;
 }
 
-export async function getIndexedFileIds(driveId: string): Promise<string[]> {
-  const allIds = new Set<string>();
+// file_id → drive_modified_at (null if unknown) のマップを返す
+export async function getIndexedFiles(driveId: string): Promise<Map<string, string | null>> {
+  const result = new Map<string, string | null>();
   const PAGE_SIZE = 1000;
   let offset = 0;
   while (true) {
     const { data, error } = await getSupabase()
       .from("documents")
-      .select("file_id")
+      .select("file_id, drive_modified_at")
       .eq("drive_id", driveId)
       .range(offset, offset + PAGE_SIZE - 1);
     if (error) throw error;
     if (!data || data.length === 0) break;
-    data.forEach((r) => allIds.add(r.file_id));
+    for (const r of data) {
+      if (!result.has(r.file_id)) {
+        result.set(r.file_id, r.drive_modified_at ?? null);
+      }
+    }
     if (data.length < PAGE_SIZE) break;
     offset += PAGE_SIZE;
   }
-  return Array.from(allIds);
+  return result;
 }
 
 // --- Chat Sessions ---

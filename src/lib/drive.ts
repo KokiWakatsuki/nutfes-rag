@@ -4,7 +4,7 @@ import { extractFileContent as geminiExtract, GeminiSkippableError } from "./gem
 import officeParser from "officeparser";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { writeFileSync, unlinkSync } from "fs";
+import { writeFileSync, unlinkSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import { join, basename } from "path";
 import sharp from "sharp";
@@ -322,6 +322,9 @@ export async function fetchFileContent(
           throw new GeminiSkippableError(`LibreOffice変換失敗: ${msg.slice(0, 120)}`);
         }
         const convertedPath = join(tmpdir(), `${basename(tmpPath, `.${ext}`)}.${modernExt}`);
+        if (!existsSync(convertedPath)) {
+          throw new GeminiSkippableError(`LibreOffice変換後ファイルが見つかりません: ${convertedPath}`);
+        }
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return String((await (officeParser as any).parseOffice(convertedPath)) ?? "");
