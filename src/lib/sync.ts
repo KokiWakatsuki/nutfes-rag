@@ -1,6 +1,6 @@
 import drives from "../../config/drives.json";
 import { listAllFiles, fetchFileContent, chunkText } from "./drive";
-import { generateEmbeddingBatch } from "./gemini";
+import { generateEmbeddingBatch, GeminiSkippableError } from "./gemini";
 import { upsertDocument, getIndexedFileIds } from "./supabase";
 
 export interface SyncResult {
@@ -156,6 +156,13 @@ async function syncDrive(
         processed++;
         console.log(`${progress} ✓ ${file.name} (${chunks.length} チャンク)`);
       } catch (err: unknown) {
+        // 破損ファイル・サイズ超過など永続的にスキップすべきエラー
+        if (err instanceof GeminiSkippableError) {
+          console.warn(`${progress} スキップ（処理不可）: ${file.name} - ${err.message}`);
+          empty++;
+          continue;
+        }
+
         const msg = err instanceof Error
           ? err.message
           : (err as { message?: string })?.message ?? String(err);

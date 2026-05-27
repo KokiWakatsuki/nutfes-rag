@@ -1,5 +1,6 @@
 import { google } from "googleapis";
 import { Storage } from "@google-cloud/storage";
+import { PDFDocument } from "pdf-lib";
 
 const PROJECT = process.env.GOOGLE_CLOUD_PROJECT!;
 const GCS_BUCKET = process.env.GCS_BUCKET;
@@ -63,6 +64,14 @@ export async function generateEmbeddingBatch(texts: string[]): Promise<number[][
 
 const OCR_PROMPT = "このファイルに含まれるテキストをすべて書き起こしてください。表・図・画像内の文字も含めてください。書き起こした内容のみを出力してください。";
 
+// 永続的にスキップすべきエラー（リトライしても無意味）
+export class GeminiSkippableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GeminiSkippableError";
+  }
+}
+
 async function geminiGenerateContent(parts: object[]): Promise<string> {
   const token = await getAccessToken();
   const res = await fetch(vertexUrl(CHAT_MODEL, "generateContent"), {
@@ -74,12 +83,62 @@ async function geminiGenerateContent(parts: object[]): Promise<string> {
   });
   if (!res.ok) {
     const err = await res.text();
+    // 破損ファイル・サイズ超過は永続的エラー → スキップ可能として扱う
+    if (res.status === 400) {
+      if (err.includes("not valid") || err.includes("no pages")) {
+        throw new GeminiSkippableError(`Gemini OCR skippable: ${err.slice(0, 200)}`);
+      }
+    }
     throw new Error(`Gemini OCR error ${res.status}: ${err}`);
   }
   const data = await res.json() as {
     candidates: Array<{ content: { parts: Array<{ text: string }> } }>;
   };
   return data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+}
+
+const GCS_PDF_LIMIT = 50 * 1024 * 1024; // Gemini GCS PDF 上限 50MB
+
+async function uploadToGcsAndExtract(
+  storage: Storage,
+  buffer: Buffer,
+  mimeType: string
+): Promise<string> {
+  const objectName = `tmp-ocr/${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  await storage.bucket(GCS_BUCKET!).file(objectName).save(buffer, { contentType: mimeType });
+  try {
+    return await geminiGenerateContent([
+      { fileData: { mimeType, fileUri: `gs://${GCS_BUCKET}/${objectName}` } },
+      { text: OCR_PROMPT },
+    ]);
+  } finally {
+    await storage.bucket(GCS_BUCKET!).file(objectName).delete().catch(() => {});
+  }
+}
+
+// 大きいPDFをページ単位で分割してGeminiに送り、結果を結合する
+async function extractLargePdf(buffer: Buffer, storage: Storage): Promise<string> {
+  const pdfDoc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+  const totalPages = pdfDoc.getPageCount();
+  const bytesPerPage = Math.max(1, buffer.length / totalPages);
+  const pagesPerChunk = Math.max(1, Math.floor((GCS_PDF_LIMIT * 0.8) / bytesPerPage));
+
+  process.stdout.write(
+    `  PDF分割: ${totalPages}ページ / ${(buffer.length / 1024 / 1024).toFixed(1)}MB → ${Math.ceil(totalPages / pagesPerChunk)}チャンクに分割\n`
+  );
+
+  const results: string[] = [];
+  for (let start = 0; start < totalPages; start += pagesPerChunk) {
+    const end = Math.min(start + pagesPerChunk, totalPages);
+    const chunk = await PDFDocument.create();
+    const pageIndices = Array.from({ length: end - start }, (_, i) => start + i);
+    const pages = await chunk.copyPages(pdfDoc, pageIndices);
+    pages.forEach((p: ReturnType<typeof chunk.addPage>) => chunk.addPage(p));
+    const chunkBytes = Buffer.from(await chunk.save());
+    const text = await uploadToGcsAndExtract(storage, chunkBytes, "application/pdf");
+    if (text.trim()) results.push(text.trim());
+  }
+  return results.join("\n\n");
 }
 
 export async function extractFileContent(
@@ -93,7 +152,7 @@ export async function extractFileContent(
     ]);
   }
 
-  // 20MB 超 → GCS に一時アップロードして fileUri で渡す
+  // 20MB 超 → GCS 経由
   if (!GCS_BUCKET) {
     throw new Error(
       `ファイルサイズ超過 (${(buffer.length / 1024 / 1024).toFixed(1)} MB > 20 MB)。GCS_BUCKET を設定してください。`
@@ -101,16 +160,13 @@ export async function extractFileContent(
   }
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY!);
   const storage = new Storage({ credentials, projectId: PROJECT });
-  const objectName = `tmp-ocr/${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  await storage.bucket(GCS_BUCKET).file(objectName).save(buffer, { contentType: mimeType });
-  try {
-    return await geminiGenerateContent([
-      { fileData: { mimeType, fileUri: `gs://${GCS_BUCKET}/${objectName}` } },
-      { text: OCR_PROMPT },
-    ]);
-  } finally {
-    await storage.bucket(GCS_BUCKET).file(objectName).delete().catch(() => {});
+
+  // PDF が 50MB 超 → ページ分割して処理
+  if (mimeType === "application/pdf" && buffer.length > GCS_PDF_LIMIT) {
+    return extractLargePdf(buffer, storage);
   }
+
+  return uploadToGcsAndExtract(storage, buffer, mimeType);
 }
 
 export async function generateAnswer(
