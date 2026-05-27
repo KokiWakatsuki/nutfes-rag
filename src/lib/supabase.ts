@@ -48,15 +48,28 @@ export interface ChatMessage {
 export async function searchDocuments(
   queryEmbedding: number[],
   editions: number[] | null,
-  limit = 5
+  limit = 8,
+  queryText?: string
 ): Promise<Document[]> {
-  const { data, error } = await getSupabase().rpc("match_documents", {
+  const params: Record<string, unknown> = {
     query_embedding: queryEmbedding,
     match_count: limit,
     filter_editions: editions,
-  });
+  };
+  if (queryText && queryText.trim().length >= 2) {
+    params.query_text = queryText.trim();
+  }
+  const { data, error } = await getSupabase().rpc("match_documents", params);
   if (error) throw error;
   return data ?? [];
+}
+
+export async function deleteChunksByFileId(fileId: string): Promise<void> {
+  const { error } = await getSupabase()
+    .from("documents")
+    .delete()
+    .eq("file_id", fileId);
+  if (error) throw error;
 }
 
 export async function upsertDocument(doc: {

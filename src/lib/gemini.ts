@@ -244,17 +244,13 @@ export async function extractFileContent(
   return uploadToGcsAndExtract(storage, buffer, mimeType);
 }
 
-export async function generateAnswer(
+function buildAnswerRequest(
   question: string,
   contexts: Array<{ file_name: string; content: string; edition: number }>,
-  history: Array<{ role: "user" | "assistant"; content: string }> = []
-): Promise<string> {
-  const token = await getAccessToken();
+  history: Array<{ role: "user" | "assistant"; content: string }>
+) {
   const contextText = contexts
-    .map(
-      (c, i) =>
-        `【資料 ${i + 1}: ${c.file_name}（第${c.edition}回）】\n${c.content}`
-    )
+    .map((c, i) => `【資料 ${i + 1}: ${c.file_name}（第${c.edition}回）】\n${c.content}`)
     .join("\n\n---\n\n");
 
   const systemInstruction = `あなたは学祭実行委員のAIアシスタントです。
@@ -266,7 +262,6 @@ export async function generateAnswer(
 【参考資料】
 ${contextText}`;
 
-  // 直近6件（3往復）の会話履歴を含める
   const contents = [
     ...history.slice(-6).map((m) => ({
       role: m.role === "assistant" ? "model" : "user",
@@ -275,20 +270,63 @@ ${contextText}`;
     { role: "user", parts: [{ text: question }] },
   ];
 
-  const res = await fetch(vertexUrl(CHAT_MODEL, "generateContent"), {
+  return { systemInstruction: { parts: [{ text: systemInstruction }] }, contents };
+}
+
+function parseStreamLine(line: string): string | null {
+  const trimmed = line.trim().replace(/^[,\[]+/, "").replace(/\]+$/, "");
+  if (!trimmed) return null;
+  try {
+    const json = JSON.parse(trimmed) as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    };
+    return json.candidates?.[0]?.content?.parts?.[0]?.text ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// ストリーミング回答生成（async generator）
+export async function* streamGenerateAnswer(
+  question: string,
+  contexts: Array<{ file_name: string; content: string; edition: number }>,
+  history: Array<{ role: "user" | "assistant"; content: string }> = []
+): AsyncGenerator<string> {
+  const token = await getAccessToken();
+  const body = buildAnswerRequest(question, contexts, history);
+
+  const res = await fetch(vertexUrl(CHAT_MODEL, "streamGenerateContent"), {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemInstruction }] },
-      contents,
-    }),
+    body: JSON.stringify(body),
   });
+
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Gemini generation error ${res.status}: ${err}`);
+    throw new Error(`Gemini streaming error ${res.status}: ${err}`);
   }
-  const data = await res.json() as {
-    candidates: Array<{ content: { parts: Array<{ text: string }> } }>;
-  };
-  return data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let remainder = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        const text = parseStreamLine(remainder);
+        if (text) yield text;
+        return;
+      }
+      remainder += decoder.decode(value, { stream: true });
+      const lines = remainder.split("\n");
+      remainder = lines.pop() ?? "";
+      for (const line of lines) {
+        const text = parseStreamLine(line);
+        if (text) yield text;
+      }
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
 }

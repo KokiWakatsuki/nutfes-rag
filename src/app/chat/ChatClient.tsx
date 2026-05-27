@@ -118,50 +118,97 @@ export default function ChatClient({
     if (!question || isLoading) return;
 
     setInput("");
-    setMessages((prev) => [...prev, { role: "user", content: question }]);
     setIsLoading(true);
+    // ユーザーメッセージ + 空のアシスタントプレースホルダーを同時追加
+    setMessages((prev) => [
+      ...prev,
+      { role: "user", content: question },
+      { role: "assistant", content: "", sources: [] },
+    ]);
+
+    const capturedSessionId = currentSessionId;
 
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          question,
-          editions: selectedEditions,
-          sessionId: currentSessionId,
-        }),
+        body: JSON.stringify({ question, editions: selectedEditions, sessionId: currentSessionId }),
       });
-      const data = await res.json();
 
-      if (!res.ok) {
-        setMessages((prev) => [
-          ...prev,
-          { role: "assistant", content: "エラーが発生しました。再度お試しください。" },
-        ]);
+      if (!res.ok || !res.body) {
+        setMessages((prev) => {
+          const msgs = [...prev];
+          msgs[msgs.length - 1] = { role: "assistant", content: "エラーが発生しました。" };
+          return msgs;
+        });
         return;
       }
 
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: data.answer, sources: data.sources },
-      ]);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = "";
 
-      if (!currentSessionId) {
-        setCurrentSessionId(data.sessionId);
-        const sessRes = await fetch("/api/sessions");
-        if (sessRes.ok) setSessions(await sessRes.json());
-      } else {
-        setSessions((prev) =>
-          prev.map((s) =>
-            s.id === data.sessionId ? { ...s, updated_at: new Date().toISOString() } : s
-          )
-        );
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        sseBuffer += decoder.decode(value, { stream: true });
+        const events = sseBuffer.split("\n\n");
+        sseBuffer = events.pop() ?? "";
+
+        for (const event of events) {
+          if (!event.startsWith("data: ")) continue;
+          try {
+            const data = JSON.parse(event.slice(6)) as {
+              type: string;
+              sessionId?: string;
+              sources?: Source[];
+              text?: string;
+            };
+
+            if (data.type === "meta") {
+              setMessages((prev) => {
+                const msgs = [...prev];
+                msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], sources: data.sources ?? [] };
+                return msgs;
+              });
+              if (!capturedSessionId && data.sessionId) {
+                setCurrentSessionId(data.sessionId);
+                fetch("/api/sessions")
+                  .then((r) => r.ok && r.json())
+                  .then((d) => Array.isArray(d) && setSessions(d));
+              } else if (data.sessionId) {
+                setSessions((prev) =>
+                  prev.map((s) =>
+                    s.id === data.sessionId ? { ...s, updated_at: new Date().toISOString() } : s
+                  )
+                );
+              }
+            } else if (data.type === "text") {
+              setMessages((prev) => {
+                const msgs = [...prev];
+                msgs[msgs.length - 1] = {
+                  ...msgs[msgs.length - 1],
+                  content: msgs[msgs.length - 1].content + (data.text ?? ""),
+                };
+                return msgs;
+              });
+            } else if (data.type === "error") {
+              setMessages((prev) => {
+                const msgs = [...prev];
+                msgs[msgs.length - 1] = { role: "assistant", content: "エラーが発生しました。" };
+                return msgs;
+              });
+            }
+          } catch {}
+        }
       }
     } catch {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: "エラーが発生しました。" },
-      ]);
+      setMessages((prev) => {
+        const msgs = [...prev];
+        msgs[msgs.length - 1] = { role: "assistant", content: "エラーが発生しました。" };
+        return msgs;
+      });
     } finally {
       setIsLoading(false);
     }
@@ -353,66 +400,61 @@ export default function ChatClient({
               </div>
             )}
 
-            {messages.map((msg, i) => (
-              <div
-                key={i}
-                className={`flex gap-3 ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-              >
-                {msg.role === "assistant" && (
-                  <div className="w-8 h-8 rounded-full bg-indigo-600 flex-shrink-0 flex items-center justify-center text-white text-xs font-bold mt-0.5">
-                    AI
-                  </div>
-                )}
-                <div className={`max-w-[78%] flex flex-col gap-1 ${msg.role === "user" ? "items-end" : "items-start"}`}>
-                  <div
-                    className={`rounded-2xl px-4 py-3 text-sm leading-relaxed ${
-                      msg.role === "user"
-                        ? "bg-indigo-600 text-white rounded-br-sm"
-                        : "bg-white border border-gray-200 text-gray-800 shadow-sm rounded-bl-sm"
-                    }`}
-                  >
-                    {msg.role === "assistant" ? (
-                      <div className="prose prose-sm max-w-none prose-headings:font-semibold prose-headings:text-gray-800 prose-p:text-gray-800 prose-li:text-gray-800 prose-table:text-sm prose-code:text-pink-600 prose-code:bg-gray-100 prose-code:rounded prose-code:px-1 prose-pre:bg-gray-100 prose-pre:rounded-lg">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
-                      </div>
-                    ) : (
-                      <p className="whitespace-pre-wrap">{msg.content}</p>
-                    )}
-                  </div>
+            {messages.map((msg, i) => {
+              const isStreamingPlaceholder =
+                isLoading && i === messages.length - 1 && msg.role === "assistant" && msg.content === "";
+              return (
+                <div
+                  key={i}
+                  className={`flex gap-3 ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                >
                   {msg.role === "assistant" && (
-                    <CopyButton text={msg.content} />
-                  )}
-                  {msg.sources && msg.sources.length > 0 && (
-                    <div className="flex flex-wrap gap-1 px-1">
-                      {msg.sources.map((s, j) => (
-                        <span
-                          key={j}
-                          className="text-xs bg-gray-100 text-gray-500 rounded-full px-2 py-0.5 truncate max-w-[200px]"
-                          title={s.fileName}
-                        >
-                          📄 {s.fileName}（第{s.edition}回）
-                        </span>
-                      ))}
+                    <div className="w-8 h-8 rounded-full bg-indigo-600 flex-shrink-0 flex items-center justify-center text-white text-xs font-bold mt-0.5">
+                      AI
                     </div>
                   )}
-                </div>
-              </div>
-            ))}
-
-            {isLoading && (
-              <div className="flex gap-3 justify-start">
-                <div className="w-8 h-8 rounded-full bg-indigo-600 flex-shrink-0 flex items-center justify-center text-white text-xs font-bold mt-0.5">
-                  AI
-                </div>
-                <div className="bg-white border border-gray-200 rounded-2xl rounded-bl-sm px-4 py-3 shadow-sm">
-                  <div className="flex gap-1 items-center h-4">
-                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.3s]" />
-                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.15s]" />
-                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" />
+                  <div className={`max-w-[78%] flex flex-col gap-1 ${msg.role === "user" ? "items-end" : "items-start"}`}>
+                    <div
+                      className={`rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                        msg.role === "user"
+                          ? "bg-indigo-600 text-white rounded-br-sm"
+                          : "bg-white border border-gray-200 text-gray-800 shadow-sm rounded-bl-sm"
+                      }`}
+                    >
+                      {isStreamingPlaceholder ? (
+                        <div className="flex gap-1 items-center h-4">
+                          <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.3s]" />
+                          <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.15s]" />
+                          <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" />
+                        </div>
+                      ) : msg.role === "assistant" ? (
+                        <div className="prose prose-sm max-w-none prose-headings:font-semibold prose-headings:text-gray-800 prose-p:text-gray-800 prose-li:text-gray-800 prose-table:text-sm prose-code:text-pink-600 prose-code:bg-gray-100 prose-code:rounded prose-code:px-1 prose-pre:bg-gray-100 prose-pre:rounded-lg">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                        </div>
+                      ) : (
+                        <p className="whitespace-pre-wrap">{msg.content}</p>
+                      )}
+                    </div>
+                    {msg.role === "assistant" && !isStreamingPlaceholder && (
+                      <CopyButton text={msg.content} />
+                    )}
+                    {msg.sources && msg.sources.length > 0 && (
+                      <div className="flex flex-wrap gap-1 px-1">
+                        {msg.sources.map((s, j) => (
+                          <span
+                            key={j}
+                            className="text-xs bg-gray-100 text-gray-500 rounded-full px-2 py-0.5 truncate max-w-[200px]"
+                            title={s.fileName}
+                          >
+                            📄 {s.fileName}（第{s.edition}回）
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
-              </div>
-            )}
+              );
+            })}
 
             <div ref={bottomRef} />
           </div>

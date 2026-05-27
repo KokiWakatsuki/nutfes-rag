@@ -1,18 +1,22 @@
 -- pgvector 拡張を有効化
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- pg_trgm: ハイブリッド検索（トライグラム類似度）に使用
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 -- ドキュメントテーブル
 CREATE TABLE IF NOT EXISTS documents (
-  id          UUID        DEFAULT gen_random_uuid() PRIMARY KEY,
-  file_id     TEXT        NOT NULL,
-  chunk_index INTEGER     NOT NULL DEFAULT 0,
-  file_name   TEXT        NOT NULL,
-  content     TEXT        NOT NULL,
-  edition     INTEGER     NOT NULL,
-  drive_id    TEXT        NOT NULL,
-  embedding   vector(768),
-  created_at  TIMESTAMPTZ DEFAULT now(),
-  updated_at  TIMESTAMPTZ DEFAULT now(),
+  id               UUID        DEFAULT gen_random_uuid() PRIMARY KEY,
+  file_id          TEXT        NOT NULL,
+  chunk_index      INTEGER     NOT NULL DEFAULT 0,
+  file_name        TEXT        NOT NULL,
+  content          TEXT        NOT NULL,
+  edition          INTEGER     NOT NULL,
+  drive_id         TEXT        NOT NULL,
+  drive_modified_at TEXT,
+  embedding        vector(768),
+  created_at       TIMESTAMPTZ DEFAULT now(),
+  updated_at       TIMESTAMPTZ DEFAULT now(),
   UNIQUE (file_id, chunk_index)
 );
 
@@ -23,6 +27,10 @@ CREATE INDEX IF NOT EXISTS documents_embedding_idx
 
 -- 回次検索用インデックス
 CREATE INDEX IF NOT EXISTS documents_edition_idx ON documents (edition);
+
+-- ハイブリッド検索用トライグラムインデックス
+CREATE INDEX IF NOT EXISTS documents_content_trgm
+  ON documents USING GIN (content gin_trgm_ops);
 
 -- updated_at を自動更新するトリガー関数
 CREATE OR REPLACE FUNCTION update_updated_at()
@@ -38,40 +46,75 @@ CREATE TRIGGER documents_updated_at
   BEFORE UPDATE ON documents
   FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
--- 旧シグネチャの match_documents 関数を削除（INTEGER[] 版に置き換え）
+-- 旧シグネチャを削除してから再作成
 DROP FUNCTION IF EXISTS match_documents(vector, INT, INT);
+DROP FUNCTION IF EXISTS match_documents(vector, INT, INTEGER[]);
+DROP FUNCTION IF EXISTS match_documents(vector, INT, INTEGER[], TEXT);
 
--- 類似ドキュメント検索関数（複数回次フィルタ対応）
-CREATE OR REPLACE FUNCTION match_documents(
+-- ハイブリッド検索関数
+-- query_text が指定された場合: ベクトル検索 + トライグラム検索を RRF で統合
+-- query_text が NULL の場合: ベクトル検索のみ
+CREATE FUNCTION match_documents(
   query_embedding vector(768),
   match_count     INT,
-  filter_editions INTEGER[] DEFAULT NULL
+  filter_editions INTEGER[] DEFAULT NULL,
+  query_text      TEXT DEFAULT NULL
 )
 RETURNS TABLE (
-  id        UUID,
-  file_id   TEXT,
-  file_name TEXT,
-  content   TEXT,
-  edition   INT,
-  drive_id  TEXT,
+  id         UUID,
+  file_id    TEXT,
+  file_name  TEXT,
+  content    TEXT,
+  edition    INT,
+  drive_id   TEXT,
   similarity FLOAT
 )
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  RETURN QUERY
-  SELECT
-    d.id,
-    d.file_id,
-    d.file_name,
-    d.content,
-    d.edition,
-    d.drive_id,
-    1 - (d.embedding <=> query_embedding) AS similarity
-  FROM documents d
-  WHERE (filter_editions IS NULL OR d.edition = ANY(filter_editions))
-  ORDER BY d.embedding <=> query_embedding
-  LIMIT match_count;
+  IF query_text IS NULL OR length(trim(query_text)) < 2 THEN
+    -- ベクトル検索のみ
+    RETURN QUERY
+    SELECT
+      d.id, d.file_id, d.file_name, d.content, d.edition, d.drive_id,
+      (1 - (d.embedding <=> query_embedding))::FLOAT AS similarity
+    FROM documents d
+    WHERE (filter_editions IS NULL OR d.edition = ANY(filter_editions))
+      AND d.embedding IS NOT NULL
+    ORDER BY d.embedding <=> query_embedding
+    LIMIT match_count;
+  ELSE
+    -- ハイブリッド検索: ベクトル + トライグラム（Reciprocal Rank Fusion）
+    RETURN QUERY
+    WITH vector_ranked AS (
+      SELECT d.id,
+             ROW_NUMBER() OVER (ORDER BY d.embedding <=> query_embedding) AS rank
+      FROM documents d
+      WHERE (filter_editions IS NULL OR d.edition = ANY(filter_editions))
+        AND d.embedding IS NOT NULL
+      LIMIT match_count * 5
+    ),
+    text_ranked AS (
+      SELECT d.id,
+             ROW_NUMBER() OVER (ORDER BY word_similarity(query_text, d.content) DESC) AS rank
+      FROM documents d
+      WHERE (filter_editions IS NULL OR d.edition = ANY(filter_editions))
+        AND word_similarity(query_text, d.content) > 0.05
+      LIMIT match_count * 5
+    ),
+    rrf AS (
+      SELECT
+        COALESCE(v.id, t.id) AS doc_id,
+        (COALESCE(1.0 / (60.0 + v.rank), 0.0) + COALESCE(1.0 / (60.0 + t.rank), 0.0))::FLOAT AS score
+      FROM vector_ranked v
+      FULL OUTER JOIN text_ranked t ON v.id = t.id
+    )
+    SELECT d.id, d.file_id, d.file_name, d.content, d.edition, d.drive_id, r.score AS similarity
+    FROM rrf r
+    JOIN documents d ON d.id = r.doc_id
+    ORDER BY r.score DESC
+    LIMIT match_count;
+  END IF;
 END;
 $$;
 

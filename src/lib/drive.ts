@@ -388,21 +388,31 @@ export async function fetchFileContent(
   throw new Error(`未対応のファイル形式: ${mimeType}`);
 }
 
-export function chunkText(text: string, maxChars = 3000): string[] {
-  const paragraphs = text.split(/\n{2,}/);
-  const chunks: string[] = [];
-  let current = "";
+export function chunkText(text: string, maxChars = 3000, overlapChars = 150): string[] {
+  const paras = text.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+  const rawChunks: string[] = [];
+  let buf = "";
 
-  for (const para of paragraphs) {
-    const trimmed = para.trim();
-    if (!trimmed) continue;
-
-    if (current.length + trimmed.length > maxChars && current.length > 0) {
-      chunks.push(current.trim());
-      current = "";
+  for (const para of paras) {
+    // 段落自体が上限超 → 文字数で強制分割
+    if (para.length > maxChars) {
+      if (buf.trim()) { rawChunks.push(buf.trim()); buf = ""; }
+      for (let i = 0; i < para.length; i += maxChars) {
+        rawChunks.push(para.slice(i, i + maxChars));
+      }
+      continue;
     }
-    current += trimmed + "\n\n";
+    if (buf.length + para.length + 2 > maxChars && buf.trim()) {
+      rawChunks.push(buf.trim());
+      buf = "";
+    }
+    buf += para + "\n\n";
   }
-  if (current.trim()) chunks.push(current.trim());
-  return chunks;
+  if (buf.trim()) rawChunks.push(buf.trim());
+
+  // 前チャンクの末尾 overlapChars 文字を次チャンク先頭に付加して文脈を繋ぐ
+  if (rawChunks.length <= 1 || overlapChars <= 0) return rawChunks;
+  return rawChunks.map((chunk, i) =>
+    i === 0 ? chunk : rawChunks[i - 1].slice(-overlapChars) + "\n\n" + chunk
+  );
 }

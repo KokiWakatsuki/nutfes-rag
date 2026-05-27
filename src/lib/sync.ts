@@ -1,7 +1,7 @@
 import drives from "../../config/drives.json";
 import { listAllFiles, fetchFileContent, chunkText } from "./drive";
 import { generateEmbeddingBatch, GeminiSkippableError } from "./gemini";
-import { upsertDocument, getIndexedFiles } from "./supabase";
+import { upsertDocument, getIndexedFiles, deleteChunksByFileId } from "./supabase";
 
 export interface SyncResult {
   processed: number;
@@ -178,6 +178,11 @@ async function syncDrive(
           }
 
           embeddings.push(...batchEmbeddings);
+        }
+
+        // 再インデックス時: 古いチャンクを全削除してから再投入（チャンク数減少時のゴミ防止）
+        if (indexedFiles.has(file.id)) {
+          await deleteChunksByFileId(file.id);
         }
 
         for (let j = 0; j < chunks.length; j++) {

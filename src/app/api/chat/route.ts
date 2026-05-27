@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
-import { generateEmbedding, generateAnswer } from "@/lib/gemini";
+import { generateEmbedding, streamGenerateAnswer } from "@/lib/gemini";
 import {
   searchDocuments,
   createChatSession,
@@ -8,6 +8,8 @@ import {
   touchChatSession,
   saveChatMessage,
 } from "@/lib/supabase";
+
+export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
   const session = await auth();
@@ -45,7 +47,7 @@ export async function POST(req: NextRequest) {
   await saveChatMessage(currentSessionId, "user", question, []);
 
   const embedding = await generateEmbedding(question);
-  const docs = await searchDocuments(embedding, filterEditions, 8);
+  const docs = await searchDocuments(embedding, filterEditions, 8, question);
 
   // ファイルIDでソース重複排除
   const seenFileIds = new Set<string>();
@@ -57,14 +59,45 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  if (docs.length === 0) {
-    const answer = "関連する資料が見つかりませんでした。";
-    await saveChatMessage(currentSessionId, "assistant", answer, []);
-    return NextResponse.json({ answer, sources: [], sessionId: currentSessionId });
-  }
+  const sid = currentSessionId;
+  const encoder = new TextEncoder();
 
-  const answer = await generateAnswer(question, docs, history);
-  await saveChatMessage(currentSessionId, "assistant", answer, sources);
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (data: object) =>
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
 
-  return NextResponse.json({ answer, sources, sessionId: currentSessionId });
+      // ソースとセッションIDをまず送信
+      send({ type: "meta", sessionId: sid, sources });
+
+      let fullText = "";
+
+      if (docs.length === 0) {
+        fullText = "関連する資料が見つかりませんでした。";
+        send({ type: "text", text: fullText });
+      } else {
+        try {
+          for await (const chunk of streamGenerateAnswer(question, docs, history)) {
+            fullText += chunk;
+            send({ type: "text", text: chunk });
+          }
+        } catch (err) {
+          send({ type: "error", message: String(err) });
+        }
+      }
+
+      await saveChatMessage(sid, "assistant", fullText || "エラーが発生しました。", sources);
+      send({ type: "done" });
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+    },
+  });
 }
