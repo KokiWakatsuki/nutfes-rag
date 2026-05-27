@@ -1,10 +1,15 @@
 import { google } from "googleapis";
 import { PDFParse } from "pdf-parse";
-import { extractFileContent as geminiExtract, GeminiSkippableError } from "./gemini";
+import { extractFileContent as geminiExtract } from "./gemini";
 import officeParser from "officeparser";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import { writeFileSync, unlinkSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { join, basename } from "path";
+import sharp from "sharp";
+
+const execFileAsync = promisify(execFile);
 
 // Google Workspace → Drive export API
 const EXPORTABLE_MIME_TYPES: Record<string, string> = {
@@ -22,6 +27,9 @@ const MIME_TO_EXT: Record<string, string> = {
   "application/vnd.ms-excel": "xls",
   "application/vnd.ms-powerpoint": "ppt",
 };
+
+// 旧 Office 形式 → モダン形式 変換マップ（LibreOffice で変換してから officeparser）
+const LEGACY_TO_MODERN: Record<string, string> = { doc: "docx", xls: "xlsx", ppt: "pptx" };
 
 // officeparser でテキスト抽出する Office ファイル種別（Vertex AI 非対応）
 const OFFICE_EXTRACT_TYPES = new Set([
@@ -64,6 +72,10 @@ export const ALL_MIME_TYPES = new Set([
 // テキストPDFか判定する最小文字数（これ未満ならスキャンPDFとして Gemini に渡す）
 const MIN_PDF_TEXT_CHARS = 100;
 
+// 画像リサイズ閾値: これより大きい画像は 2048px に縮小して Gemini に渡す
+const IMAGE_RESIZE_THRESHOLD = 3 * 1024 * 1024;
+const IMAGE_MAX_DIM = 2048;
+
 // SYNC_TYPES 環境変数で対象を絞り込む
 // all (デフォルト) | no-pdf | docs-slides | docs
 const SYNC_TYPES_FILTER: Record<string, Set<string>> = {
@@ -94,6 +106,28 @@ const SYNC_TYPES_FILTER: Record<string, Set<string>> = {
 function getEnabledMimeTypes(): Set<string> {
   const key = (process.env.SYNC_TYPES ?? "all").toLowerCase();
   return SYNC_TYPES_FILTER[key] ?? ALL_MIME_TYPES;
+}
+
+// HEIC/HEIF → JPEG 変換 + 大サイズ画像リサイズ（Gemini OCR タイムアウト防止）
+async function normalizeImage(buf: Buffer, mimeType: string): Promise<{ buf: Buffer; mimeType: string }> {
+  if (mimeType === "image/heic" || mimeType === "image/heif") {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const heicConvertModule = require("heic-convert");
+    const heicConvert: (opts: { buffer: Buffer; format: "JPEG"; quality: number }) => Promise<ArrayBuffer> =
+      heicConvertModule.default ?? heicConvertModule;
+    const converted = await heicConvert({ buffer: buf, format: "JPEG", quality: 0.9 });
+    buf = Buffer.from(converted);
+    mimeType = "image/jpeg";
+  }
+  if (buf.length > IMAGE_RESIZE_THRESHOLD) {
+    buf = await sharp(buf)
+      .rotate()
+      .resize(IMAGE_MAX_DIM, IMAGE_MAX_DIM, { fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 85 })
+      .toBuffer();
+    mimeType = "image/jpeg";
+  }
+  return { buf, mimeType };
 }
 
 let _driveAuth: InstanceType<typeof google.auth.GoogleAuth> | null = null;
@@ -258,30 +292,42 @@ export async function fetchFileContent(
     return Buffer.from(res.data as ArrayBuffer).toString("utf-8");
   }
 
-  // Office ファイル → officeparser でテキスト抽出（Vertex AI は非対応）
+  // Office ファイル → officeparser でテキスト抽出
   if (OFFICE_EXTRACT_TYPES.has(mimeType)) {
     const res = await drive.files.get(
       { fileId, alt: "media" },
       { responseType: "arraybuffer" }
     );
     const buf = Buffer.from(res.data as ArrayBuffer);
-    // officeparser はバッファのみでは形式を判別できない場合があるため
-    // 拡張子付きの一時ファイルに書き出して処理する
     const ext = MIME_TO_EXT[mimeType] ?? "bin";
-    const tmpPath = join(tmpdir(), `office-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`);
+    const uid = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const tmpPath = join(tmpdir(), `office-${uid}.${ext}`);
     writeFileSync(tmpPath, buf);
+
+    const modernExt = LEGACY_TO_MODERN[ext];
     try {
+      if (modernExt) {
+        // .ppt/.doc/.xls などの旧形式: LibreOffice で .pptx/.docx/.xlsx に変換してから処理
+        // -env:UserInstallation で並列実行時のプロファイル競合を回避
+        await execFileAsync("libreoffice", [
+          "--headless",
+          `-env:UserInstallation=file:///tmp/lo-${uid}`,
+          "--convert-to", modernExt,
+          "--outdir", tmpdir(),
+          tmpPath,
+        ], { timeout: 60_000 });
+        const convertedPath = join(tmpdir(), `${basename(tmpPath, `.${ext}`)}.${modernExt}`);
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return String((await (officeParser as any).parseOffice(convertedPath)) ?? "");
+        } finally {
+          try { unlinkSync(convertedPath); } catch {}
+        }
+      }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return String((await (officeParser as any).parseOffice(tmpPath)) ?? "");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // officeparser が未対応の形式（.ppt/.doc/.xls など）は永続的エラー → スキップ
-      if (msg.includes("[OfficeParser]:")) {
-        throw new GeminiSkippableError(`OfficeParser unsupported: ${msg.slice(0, 120)}`);
-      }
-      throw err;
     } finally {
-      unlinkSync(tmpPath);
+      try { unlinkSync(tmpPath); } catch {}
     }
   }
 
@@ -291,7 +337,7 @@ export async function fetchFileContent(
       { fileId, alt: "media" },
       { responseType: "arraybuffer" }
     );
-    const buf = Buffer.from(res.data as ArrayBuffer);
+    let buf = Buffer.from(res.data as ArrayBuffer);
 
     // テキストPDF: pdf-parse で高速処理（APIコスト不要）
     if (mimeType === "application/pdf") {
@@ -307,8 +353,16 @@ export async function fetchFileContent(
       }
     }
 
+    // 画像: HEIC→JPEG 変換 + 大サイズリサイズ（タイムアウト防止）
+    let effectiveMimeType = mimeType;
+    if (mimeType !== "application/pdf") {
+      const normalized = await normalizeImage(buf, mimeType);
+      buf = Buffer.from(normalized.buf);
+      effectiveMimeType = normalized.mimeType;
+    }
+
     // スキャンPDF・画像: Gemini Flash でテキスト抽出
-    return await geminiExtract(buf, mimeType);
+    return await geminiExtract(buf, effectiveMimeType);
   }
 
   throw new Error(`未対応のファイル形式: ${mimeType}`);
