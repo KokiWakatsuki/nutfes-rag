@@ -1,6 +1,6 @@
 import { google } from "googleapis";
 import { PDFParse } from "pdf-parse";
-import { extractFileContent as geminiExtract } from "./gemini";
+import { extractFileContent as geminiExtract, GeminiSkippableError } from "./gemini";
 import officeParser from "officeparser";
 import { execFile } from "child_process";
 import { promisify } from "util";
@@ -309,23 +309,36 @@ export async function fetchFileContent(
       if (modernExt) {
         // .ppt/.doc/.xls などの旧形式: LibreOffice で .pptx/.docx/.xlsx に変換してから処理
         // -env:UserInstallation で並列実行時のプロファイル競合を回避
-        await execFileAsync("libreoffice", [
-          "--headless",
-          `-env:UserInstallation=file:///tmp/lo-${uid}`,
-          "--convert-to", modernExt,
-          "--outdir", tmpdir(),
-          tmpPath,
-        ], { timeout: 60_000 });
+        try {
+          await execFileAsync("libreoffice", [
+            "--headless",
+            `-env:UserInstallation=file:///tmp/lo-${uid}`,
+            "--convert-to", modernExt,
+            "--outdir", tmpdir(),
+            tmpPath,
+          ], { timeout: 60_000 });
+        } catch (libreErr) {
+          const msg = libreErr instanceof Error ? libreErr.message : String(libreErr);
+          throw new GeminiSkippableError(`LibreOffice変換失敗: ${msg.slice(0, 120)}`);
+        }
         const convertedPath = join(tmpdir(), `${basename(tmpPath, `.${ext}`)}.${modernExt}`);
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return String((await (officeParser as any).parseOffice(convertedPath)) ?? "");
+        } catch (parseErr) {
+          const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+          throw new GeminiSkippableError(`変換後のOfficeファイル解析失敗: ${msg.slice(0, 120)}`);
         } finally {
           try { unlinkSync(convertedPath); } catch {}
         }
       }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return String((await (officeParser as any).parseOffice(tmpPath)) ?? "");
+    } catch (err) {
+      if (err instanceof GeminiSkippableError) throw err;
+      // officeparser が破損ファイルや非対応形式でエラーを投げた場合は永続的スキップ
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new GeminiSkippableError(`Officeファイル解析失敗: ${msg.slice(0, 120)}`);
     } finally {
       try { unlinkSync(tmpPath); } catch {}
     }
@@ -356,9 +369,13 @@ export async function fetchFileContent(
     // 画像: HEIC→JPEG 変換 + 大サイズリサイズ（タイムアウト防止）
     let effectiveMimeType = mimeType;
     if (mimeType !== "application/pdf") {
-      const normalized = await normalizeImage(buf, mimeType);
-      buf = Buffer.from(normalized.buf);
-      effectiveMimeType = normalized.mimeType;
+      try {
+        const normalized = await normalizeImage(buf, mimeType);
+        buf = Buffer.from(normalized.buf);
+        effectiveMimeType = normalized.mimeType;
+      } catch (_normalizeErr) {
+        // sharp/heic-convert 失敗（破損画像等）→ 元バッファのままフォールバック
+      }
     }
 
     // スキャンPDF・画像: Gemini Flash でテキスト抽出

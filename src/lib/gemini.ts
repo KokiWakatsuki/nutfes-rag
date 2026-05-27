@@ -109,7 +109,9 @@ async function geminiGenerateContent(parts: object[]): Promise<string> {
     const err = await res.text();
     // 破損ファイル・サイズ超過は永続的エラー → スキップ可能として扱う
     if (res.status === 400) {
-      if (err.includes("not valid") || err.includes("no pages")) {
+      // ファイル破損・暗号化・サイズ超過など永続的に処理不能なケース
+      const skipPatterns = ["not valid", "no pages", "Invalid PDF", "encrypted", "password", "INVALID_ARGUMENT"];
+      if (skipPatterns.some((p) => err.includes(p))) {
         throw new GeminiSkippableError(`Gemini OCR skippable: ${err.slice(0, 200)}`);
       }
     }
