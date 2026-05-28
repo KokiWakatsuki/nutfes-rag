@@ -56,6 +56,43 @@ async function main() {
     } else {
       console.log(`  embedding: 全チャンク生成済み`);
     }
+
+    // --- データ品質チェック ---
+    console.log("\n【データ品質チェック】");
+
+    // content が空文字のチャンク（空白のみを含む）
+    const { count: emptyContent } = await supabase
+      .from("documents")
+      .select("*", { count: "exact", head: true })
+      .or("content.is.null,content.eq.");
+    console.log(`  content が null/空文字: ${emptyContent ?? 0} チャンク${emptyContent ? " ⚠️" : " ✅"}`);
+
+    // サンプル3件を取得して内容を目視確認
+    const { data: samples } = await supabase
+      .from("documents")
+      .select("file_name, chunk_index, content, embedding")
+      .limit(3);
+    if (samples && samples.length > 0) {
+      console.log("  サンプル3件:");
+      for (const s of samples) {
+        const content = s.content as unknown;
+        const embedding = s.embedding as unknown;
+
+        // content の型チェック
+        const contentOk = typeof content === "string" && (content as string).length > 0;
+        const contentPreview = contentOk
+          ? (content as string).slice(0, 60).replace(/\n/g, "↵")
+          : `[異常] ${JSON.stringify(content).slice(0, 60)}`;
+
+        // embedding の型・次元チェック
+        const embedDim = Array.isArray(embedding) ? (embedding as number[]).length : "非配列";
+        const embedOk = embedDim === 768;
+
+        console.log(`    [${s.file_name} chunk=${s.chunk_index}]`);
+        console.log(`      content(${contentOk ? "✅" : "❌"} ${typeof content}): "${contentPreview}"`);
+        console.log(`      embedding(${embedOk ? "✅" : "❌"}): ${embedDim}次元`);
+      }
+    }
   }
 
   // --- チャットセッション統計 ---
