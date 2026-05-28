@@ -267,7 +267,7 @@ async function listAllFilesParallel(
   return files;
 }
 
-export async function fetchFileContent(
+async function fetchFileContentImpl(
   fileId: string,
   mimeType: string
 ): Promise<string> {
@@ -406,7 +406,24 @@ export async function fetchFileContent(
     return await geminiExtract(buf, effectiveMimeType);
   }
 
-  throw new Error(`未対応のファイル形式: ${mimeType}`);
+  throw new GeminiSkippableError(`未対応のファイル形式: ${mimeType}`);
+}
+
+// 外側ラッパー: fetchFileContentImpl から漏れた全エラーをネットワーク系以外は GeminiSkippableError に変換
+// （内部の個別 catch が tsx ESM/CJS 境界で機能しない場合の保険）
+export async function fetchFileContent(
+  fileId: string,
+  mimeType: string
+): Promise<string> {
+  try {
+    return await fetchFileContentImpl(fileId, mimeType);
+  } catch (err) {
+    if (err instanceof GeminiSkippableError || (err as Error)?.name === "GeminiSkippableError") throw err;
+    const msg = err instanceof Error ? err.message : String(err);
+    const isTransient = msg.includes("ETIMEDOUT") || msg.includes("ECONNRESET") || msg.includes("ENOTFOUND") || msg.includes("fetch failed");
+    if (isTransient) throw err;
+    throw new GeminiSkippableError(`ファイル処理失敗: ${msg.slice(0, 120)}`);
+  }
 }
 
 export { chunkText } from "./text";
