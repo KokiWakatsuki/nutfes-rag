@@ -204,7 +204,7 @@ async function syncDrive(
           // upsert → stale削除の順（逆順だとクラッシュ時にデータ消失するため）
           for (let k = 0; k < batch.length; k++) {
             const chunkIdx = b + k;
-            const chunkText = batch[k];
+            const chunkText = batch[k].toWellFormed();
             try {
               await upsertDocument({
                 file_id: file.id,
