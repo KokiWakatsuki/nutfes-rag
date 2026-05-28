@@ -14,6 +14,7 @@
     "test:watch": "vitest",
     "inspect": "tsx --env-file=.env.local scripts/inspect.ts",
     "reindex": "tsx --env-file=.env.local scripts/reindex.ts",
+    "reindex:ci": "tsx scripts/reindex.ts",
     "migrate": "tsx --env-file=.env.local scripts/migrate.ts",
     "migrate:ci": "tsx scripts/migrate.ts"
   },
