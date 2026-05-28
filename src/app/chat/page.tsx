@@ -9,25 +9,12 @@ export default async function ChatPage() {
 
   const editions = drives.map((d) => d.edition).sort((a, b) => b - a);
 
+  const logoutAction = async () => {
+    "use server";
+    await signOut({ redirectTo: "/" });
+  };
+
   return (
-    <div className="h-screen flex flex-col">
-      {/* ログアウトは隠し UI（サイドバーのメールをクリックでも OK） */}
-      <div className="absolute top-2 right-3 z-10">
-        <form
-          action={async () => {
-            "use server";
-            await signOut({ redirectTo: "/" });
-          }}
-        >
-          <button
-            type="submit"
-            className="text-xs text-gray-400 hover:text-gray-600 transition-colors px-2 py-1 rounded hover:bg-gray-100"
-          >
-            ログアウト
-          </button>
-        </form>
-      </div>
-      <ChatClient editions={editions} userEmail={session.user.email} />
-    </div>
+    <ChatClient editions={editions} userEmail={session.user.email} logoutAction={logoutAction} />
   );
 }

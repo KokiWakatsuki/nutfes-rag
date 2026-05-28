@@ -25,9 +25,11 @@ interface Session {
 export default function ChatClient({
   editions,
   userEmail,
+  logoutAction,
 }: {
   editions: number[];
   userEmail: string;
+  logoutAction: () => Promise<void>;
 }) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
@@ -337,10 +339,18 @@ export default function ChatClient({
           )}
         </div>
 
-        <div className="p-4 border-t border-gray-700">
-          <p className="text-xs text-gray-400 truncate" title={userEmail}>
+        <div className="p-4 border-t border-gray-700 flex items-center gap-2">
+          <p className="text-xs text-gray-400 truncate flex-1" title={userEmail}>
             {userEmail}
           </p>
+          <form action={logoutAction}>
+            <button
+              type="submit"
+              className="text-xs text-gray-500 hover:text-gray-200 transition-colors whitespace-nowrap"
+            >
+              ログアウト
+            </button>
+          </form>
         </div>
       </aside>
 
