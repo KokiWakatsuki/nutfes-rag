@@ -311,15 +311,21 @@ export async function* streamGenerateAnswer(
   const decoder = new TextDecoder();
   let remainder = "";
 
+  let firstChunkLogged = false;
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) {
+        if (!firstChunkLogged) console.error("[stream-diag] stream ended with no chunks. remainder:", JSON.stringify(remainder.slice(0, 500)));
         const text = parseStreamLine(remainder);
         if (text) yield text;
         return;
       }
       remainder += decoder.decode(value, { stream: true });
+      if (!firstChunkLogged) {
+        console.log("[stream-diag] first raw chunk:", JSON.stringify(remainder.slice(0, 500)));
+        firstChunkLogged = true;
+      }
       const lines = remainder.split("\n");
       remainder = lines.pop() ?? "";
       for (const line of lines) {
