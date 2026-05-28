@@ -5,6 +5,10 @@ on:
     - cron: '0 0 * * *'   # 毎日 00:00 UTC (09:00 JST)
   workflow_dispatch:        # 手動実行
 
+concurrency:
+  group: drive-sync
+  cancel-in-progress: false  # 実行中の方を優先し、後から来た方はキューで待機
+
 jobs:
   sync:
     runs-on: ubuntu-latest
