@@ -14,8 +14,8 @@ async function main() {
   );
 
   console.log("⚠️  documents テーブルの全レコードを削除します...");
-  // .not("id", "is", null) = WHERE id IS NOT NULL → 全行対象
-  const { error } = await supabase.from("documents").delete().not("id", "is", null);
+  // TRUNCATE で確実に全件削除（delete は行数制限で不完全になる場合がある）
+  const { error } = await supabase.rpc("truncate_documents");
   if (error) throw new Error(`削除失敗: ${error.message}`);
   console.log("✅ 削除完了。同期を開始します...\n");
 
