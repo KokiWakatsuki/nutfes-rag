@@ -85,7 +85,15 @@ async function main() {
           : `[異常] ${JSON.stringify(content).slice(0, 60)}`;
 
         // embedding の型・次元チェック
-        const embedDim = Array.isArray(embedding) ? (embedding as number[]).length : "非配列";
+        // pgvector は supabase-js で文字列 "[0.1,0.2,...]" として返るため両方対応
+        let embedDim: number | string;
+        if (Array.isArray(embedding)) {
+          embedDim = (embedding as number[]).length;
+        } else if (typeof embedding === "string") {
+          embedDim = (embedding as string).split(",").length;
+        } else {
+          embedDim = "非配列";
+        }
         const embedOk = embedDim === 768;
 
         console.log(`    [${s.file_name} chunk=${s.chunk_index}]`);
