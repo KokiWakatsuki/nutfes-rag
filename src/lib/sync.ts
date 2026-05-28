@@ -159,7 +159,7 @@ async function syncDrive(
 
         const content = raw
           .replace(/\x00/g, "") // eslint-disable-line no-control-regex
-          .replace(/[\uD800-\uDFFF]/g, ""); // 孤立サロゲートは JSON で無効のため除去（/u フラグなし）
+          .toWellFormed(); // 孤立サロゲートを U+FFFD に置換（削除より意味が明確）
 
         if (!content.trim()) {
           empty++;
