@@ -168,7 +168,11 @@ async function syncDrive(
           continue;
         }
 
-        const chunks = chunkText(content);
+        // フォルダパスをコンテンツ先頭に付与（検索精度向上のため）
+        const contentWithPath = file.folderPath
+          ? `【フォルダ: ${file.folderPath}】\n${content}`
+          : content;
+        const chunks = chunkText(contentWithPath);
         let lastWrittenIdx = -1;
 
         for (let b = 0; b < chunks.length; b += EMBED_BATCH_SIZE) {

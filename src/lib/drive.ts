@@ -149,6 +149,7 @@ export interface DriveFile {
   name: string;
   mimeType: string;
   modifiedTime: string;
+  folderPath: string; // 例: "第43回技大祭 > 01_43rd_執行部 > 01_43rd_執行部MT"
 }
 
 export async function listAllFiles(folderId: string): Promise<DriveFile[]> {
@@ -168,12 +169,55 @@ export async function listAllFiles(folderId: string): Promise<DriveFile[]> {
   }
 }
 
+// Shared Drive 内の全フォルダのパスマップを構築
+async function buildFolderPathMap(
+  drive: ReturnType<typeof google.drive>,
+  driveId: string
+): Promise<Map<string, string>> {
+  const folderData = new Map<string, { name: string; parentId?: string }>();
+  let pageToken: string | undefined;
+
+  do {
+    const res = await drive.files.list({
+      corpora: "drive",
+      driveId,
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+      q: "trashed = false and mimeType = 'application/vnd.google-apps.folder'",
+      fields: "nextPageToken, files(id, name, parents)",
+      pageSize: 1000,
+      pageToken,
+    });
+    for (const f of res.data.files ?? []) {
+      if (f.id && f.name) folderData.set(f.id, { name: f.name, parentId: f.parents?.[0] });
+    }
+    pageToken = res.data.nextPageToken ?? undefined;
+  } while (pageToken);
+
+  const pathCache = new Map<string, string>();
+
+  function getPath(folderId: string): string {
+    if (folderId === driveId) return "";
+    if (pathCache.has(folderId)) return pathCache.get(folderId)!;
+    const folder = folderData.get(folderId);
+    if (!folder) return "";
+    const parentPath = folder.parentId ? getPath(folder.parentId) : "";
+    const path = parentPath ? `${parentPath} > ${folder.name}` : folder.name;
+    pathCache.set(folderId, path);
+    return path;
+  }
+
+  for (const [id] of folderData) getPath(id);
+  return pathCache;
+}
+
 // Shared Drive 全体を一括取得（フォルダ再帰不要）
 async function listAllFilesFlat(
   drive: ReturnType<typeof google.drive>,
   driveId: string,
   enabledTypes: Set<string>
 ): Promise<DriveFile[]> {
+  const folderPathMap = await buildFolderPathMap(drive, driveId);
   const files: DriveFile[] = [];
   let pageToken: string | undefined;
   let page = 0;
@@ -185,7 +229,7 @@ async function listAllFilesFlat(
       includeItemsFromAllDrives: true,
       supportsAllDrives: true,
       q: "trashed = false and mimeType != 'application/vnd.google-apps.folder'",
-      fields: "nextPageToken, files(id, name, mimeType, modifiedTime)",
+      fields: "nextPageToken, files(id, name, mimeType, modifiedTime, parents)",
       pageSize: 1000,
       pageToken,
     });
@@ -194,11 +238,13 @@ async function listAllFilesFlat(
     for (const f of res.data.files ?? []) {
       if (!f.id || !f.name || !f.mimeType) continue;
       if (enabledTypes.has(f.mimeType)) {
+        const parentId = f.parents?.[0];
         files.push({
           id: f.id,
           name: f.name,
           mimeType: f.mimeType,
           modifiedTime: f.modifiedTime ?? "",
+          folderPath: parentId ? (folderPathMap.get(parentId) ?? "") : "",
         });
       }
     }
@@ -217,14 +263,15 @@ async function listAllFilesParallel(
   enabledTypes: Set<string>
 ): Promise<DriveFile[]> {
   const files: DriveFile[] = [];
-  const folderQueue: string[] = [rootId];
+  const folderQueue: Array<{ id: string; path: string }> = [{ id: rootId, path: "" }];
   let folderCount = 0;
   const FOLDER_CONCURRENCY = 20;
 
   async function processQueue() {
     while (folderQueue.length > 0) {
-      const parentId = folderQueue.shift();
-      if (!parentId) continue;
+      const item = folderQueue.shift();
+      if (!item) continue;
+      const { id: parentId, path: currentPath } = item;
       folderCount++;
       if (folderCount % 20 === 0) {
         process.stdout.write(`  フォルダ探索中: ${folderCount} フォルダ目, ファイル ${files.length} 件\n`);
@@ -244,13 +291,15 @@ async function listAllFilesParallel(
         for (const f of res.data.files ?? []) {
           if (!f.id || !f.name || !f.mimeType) continue;
           if (f.mimeType === "application/vnd.google-apps.folder") {
-            folderQueue.push(f.id);
+            const childPath = currentPath ? `${currentPath} > ${f.name}` : f.name;
+            folderQueue.push({ id: f.id, path: childPath });
           } else if (enabledTypes.has(f.mimeType)) {
             files.push({
               id: f.id,
               name: f.name,
               mimeType: f.mimeType,
               modifiedTime: f.modifiedTime ?? "",
+              folderPath: currentPath,
             });
           }
         }
