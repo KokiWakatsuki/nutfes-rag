@@ -206,7 +206,8 @@ async function syncDrive(
         printProgress(displayName(file.name, file.mimeType));
       } catch (err: unknown) {
         // 破損ファイル・サイズ超過など永続的にスキップすべきエラー
-        if (err instanceof GeminiSkippableError) {
+        // tsx の ESM/CJS 境界で instanceof が失敗する場合があるため name でも判定
+        if (err instanceof GeminiSkippableError || (err as Error)?.name === "GeminiSkippableError") {
           empty++;
           completedCount++;
           printProgress(displayName(file.name, file.mimeType));
