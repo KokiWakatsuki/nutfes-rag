@@ -1,3 +1,7 @@
+-- 注意: このファイルはリファレンス用です。
+-- 実際のスキーマ変更は supabase/migrations/ に追加し、
+-- `npm run migrate` で適用してください。
+--
 -- pgvector 拡張を有効化
 CREATE EXTENSION IF NOT EXISTS vector;
 

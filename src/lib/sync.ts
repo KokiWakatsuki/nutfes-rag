@@ -13,16 +13,13 @@ export interface SyncResult {
 const CONCURRENCY = 5;
 const EMBED_BATCH_SIZE = 5;
 // text-embedding-004: 20,000 tokens/request 上限
-// 3000文字×5チャンク ≈ 5,000〜10,000 tokens で安全に収まる
+// 1800文字×5チャンク ≈ 5,000〜10,000 tokens で安全に収まる
 const EMBED_INTERVAL_MS = 700;
 
 async function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Vertex AI 429 の種別を判定
-// "daily quota exhausted" → true（abort）
-// "rate limit / resource exhausted" → false（リトライ可）
 const MIME_TO_EXT: Record<string, string> = {
   "application/vnd.google-apps.document": ".docx",
   "application/vnd.google-apps.spreadsheet": ".xlsx",
@@ -39,13 +36,17 @@ function displayName(name: string, mimeType: string): string {
   return name + (MIME_TO_EXT[mimeType] ?? "");
 }
 
+// Vertex AI 429 の種別を判定
+// 日次クォータ超過 → true（全ワーカー停止）
+// レート制限（一時的）→ false（リトライ可）
 function isDailyQuotaExhausted(msg: string): boolean {
   const lower = msg.toLowerCase();
   return (
     lower.includes("daily limit") ||
     lower.includes("quota exceeded") ||
     lower.includes("insufficient_quota") ||
-    (lower.includes("quota") && !lower.includes("resource exhausted") && !lower.includes("try again"))
+    lower.includes("daily quota") ||
+    lower.includes("ratequotaexceeded")
   );
 }
 
@@ -147,7 +148,8 @@ async function syncDrive(
             throw retryErr;
           }
         }
-        const content = raw!.replace(/\x00/g, ""); // eslint-disable-line no-control-regex
+        if (raw === undefined) throw new GeminiSkippableError("空のレスポンス");
+        const content = raw.replace(/\x00/g, ""); // eslint-disable-line no-control-regex
 
         if (!content.trim()) {
           empty++;
@@ -157,7 +159,7 @@ async function syncDrive(
         }
 
         const chunks = chunkText(content);
-        const embeddings: number[][] = [];
+        let lastWrittenIdx = -1;
 
         for (let b = 0; b < chunks.length; b += EMBED_BATCH_SIZE) {
           await sleep(EMBED_INTERVAL_MS);
@@ -177,25 +179,26 @@ async function syncDrive(
             firstFile = false;
           }
 
-          embeddings.push(...batchEmbeddings);
+          // 生成直後に DB へ書き込み（全チャンク分メモリに保持しない）
+          // upsert → stale削除の順（逆順だとクラッシュ時にデータ消失するため）
+          for (let k = 0; k < batch.length; k++) {
+            await upsertDocument({
+              file_id: file.id,
+              chunk_index: b + k,
+              file_name: file.name,
+              content: batch[k],
+              edition,
+              drive_id: driveId,
+              drive_modified_at: file.modifiedTime || undefined,
+              embedding: batchEmbeddings[k],
+            });
+            lastWrittenIdx = b + k;
+          }
         }
 
-        // upsert → stale削除の順（逆順だとクラッシュ時にデータ消失するため）
-        for (let j = 0; j < chunks.length; j++) {
-          await upsertDocument({
-            file_id: file.id,
-            chunk_index: j,
-            file_name: file.name,
-            content: chunks[j],
-            edition,
-            drive_id: driveId,
-            drive_modified_at: file.modifiedTime || undefined,
-            embedding: embeddings[j],
-          });
-        }
         // 旧ファイルがより多くのチャンクを持っていた場合、余分なチャンクを削除
         if (indexedFiles.has(file.id)) {
-          await deleteStaleChunks(file.id, chunks.length - 1);
+          await deleteStaleChunks(file.id, lastWrittenIdx);
         }
 
         processed++;

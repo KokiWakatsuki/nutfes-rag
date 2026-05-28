@@ -218,8 +218,8 @@ export async function extractFileContent(
 ): Promise<string> {
   if (mimeType === "application/pdf" && buffer.length > PDF_SAFE_CHUNK_SIZE) {
     if (!GCS_BUCKET) {
-      throw new Error(
-        `PDF分割にはGCSが必要です (${(buffer.length / 1024 / 1024).toFixed(1)} MB > ${PDF_SAFE_CHUNK_SIZE / 1024 / 1024} MB)。GCS_BUCKET を設定してください。`
+      throw new GeminiSkippableError(
+        `大容量 PDF のため処理をスキップしました (${(buffer.length / 1024 / 1024).toFixed(1)} MB > ${PDF_SAFE_CHUNK_SIZE / 1024 / 1024} MB)。GCS_BUCKET を設定すると処理できます。`
       );
     }
     const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY!);
@@ -235,8 +235,8 @@ export async function extractFileContent(
   }
 
   if (!GCS_BUCKET) {
-    throw new Error(
-      `ファイルサイズ超過 (${(buffer.length / 1024 / 1024).toFixed(1)} MB > 20 MB)。GCS_BUCKET を設定してください。`
+    throw new GeminiSkippableError(
+      `大容量ファイルのため処理をスキップしました (${(buffer.length / 1024 / 1024).toFixed(1)} MB > 20 MB)。GCS_BUCKET を設定すると処理できます。`
     );
   }
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY!);
@@ -306,7 +306,8 @@ export async function* streamGenerateAnswer(
     throw new Error(`Gemini streaming error ${res.status}: ${err}`);
   }
 
-  const reader = res.body!.getReader();
+  if (!res.body) throw new Error("Gemini streaming: response body is null");
+  const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let remainder = "";
 

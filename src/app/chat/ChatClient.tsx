@@ -148,6 +148,60 @@ export default function ChatClient({
       const decoder = new TextDecoder();
       let sseBuffer = "";
 
+      const handleEvent = (event: string) => {
+        if (!event.startsWith("data: ")) return;
+        try {
+          const data = JSON.parse(event.slice(6)) as {
+            type: string;
+            sessionId?: string;
+            sources?: Source[];
+            text?: string;
+          };
+
+          if (data.type === "meta") {
+            setMessages((prev) => {
+              const msgs = [...prev];
+              msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], sources: data.sources ?? [] };
+              return msgs;
+            });
+            if (!capturedSessionId && data.sessionId) {
+              setCurrentSessionId(data.sessionId);
+              // API 再フェッチせず、新セッションをリストの先頭に追加
+              setSessions((prev) => [
+                {
+                  id: data.sessionId!,
+                  title: question.length > 40 ? question.slice(0, 40) + "…" : question,
+                  editions: selectedEditions,
+                  updated_at: new Date().toISOString(),
+                },
+                ...prev,
+              ]);
+            } else if (data.sessionId) {
+              setSessions((prev) =>
+                prev.map((s) =>
+                  s.id === data.sessionId ? { ...s, updated_at: new Date().toISOString() } : s
+                )
+              );
+            }
+          } else if (data.type === "text") {
+            setMessages((prev) => {
+              const msgs = [...prev];
+              msgs[msgs.length - 1] = {
+                ...msgs[msgs.length - 1],
+                content: msgs[msgs.length - 1].content + (data.text ?? ""),
+              };
+              return msgs;
+            });
+          } else if (data.type === "error") {
+            setMessages((prev) => {
+              const msgs = [...prev];
+              msgs[msgs.length - 1] = { role: "assistant", content: "エラーが発生しました。" };
+              return msgs;
+            });
+          }
+        } catch {}
+      };
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -155,54 +209,11 @@ export default function ChatClient({
         sseBuffer += decoder.decode(value, { stream: true });
         const events = sseBuffer.split("\n\n");
         sseBuffer = events.pop() ?? "";
-
-        for (const event of events) {
-          if (!event.startsWith("data: ")) continue;
-          try {
-            const data = JSON.parse(event.slice(6)) as {
-              type: string;
-              sessionId?: string;
-              sources?: Source[];
-              text?: string;
-            };
-
-            if (data.type === "meta") {
-              setMessages((prev) => {
-                const msgs = [...prev];
-                msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], sources: data.sources ?? [] };
-                return msgs;
-              });
-              if (!capturedSessionId && data.sessionId) {
-                setCurrentSessionId(data.sessionId);
-                fetch("/api/sessions")
-                  .then((r) => r.ok && r.json())
-                  .then((d) => Array.isArray(d) && setSessions(d));
-              } else if (data.sessionId) {
-                setSessions((prev) =>
-                  prev.map((s) =>
-                    s.id === data.sessionId ? { ...s, updated_at: new Date().toISOString() } : s
-                  )
-                );
-              }
-            } else if (data.type === "text") {
-              setMessages((prev) => {
-                const msgs = [...prev];
-                msgs[msgs.length - 1] = {
-                  ...msgs[msgs.length - 1],
-                  content: msgs[msgs.length - 1].content + (data.text ?? ""),
-                };
-                return msgs;
-              });
-            } else if (data.type === "error") {
-              setMessages((prev) => {
-                const msgs = [...prev];
-                msgs[msgs.length - 1] = { role: "assistant", content: "エラーが発生しました。" };
-                return msgs;
-              });
-            }
-          } catch {}
-        }
+        for (const event of events) handleEvent(event);
       }
+
+      // ループ終了後にバッファに残ったイベントを処理
+      if (sseBuffer.trim()) handleEvent(sseBuffer.trim());
     } catch {
       setMessages((prev) => {
         const msgs = [...prev];

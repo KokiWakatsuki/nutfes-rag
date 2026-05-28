@@ -12,7 +12,10 @@
     "estimate": "tsx --env-file=.env.local scripts/estimate.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "reindex": "tsx --env-file=.env.local scripts/reindex.ts"
+    "inspect": "tsx --env-file=.env.local scripts/inspect.ts",
+    "reindex": "tsx --env-file=.env.local scripts/reindex.ts",
+    "migrate": "tsx --env-file=.env.local scripts/migrate.ts",
+    "migrate:ci": "tsx scripts/migrate.ts"
   },
   "repository": {
     "type": "git",

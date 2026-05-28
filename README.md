@@ -28,7 +28,7 @@ Vertex AI text-embedding-004（ベクトル化）
   ↓
 Supabase pgvector（保存・検索）
   ↓
-Vertex AI Gemini 2.0 Flash（回答生成）
+Vertex AI Gemini 2.5 Flash（回答生成）
   ↓
 Web チャット UI（ログイン後すぐ使える）
 ```
@@ -40,7 +40,7 @@ Web チャット UI（ログイン後すぐ使える）
 | Google ドキュメント / スプレッドシート / スライド | Drive export API |
 | テキスト PDF | pdf-parse で直接抽出 |
 | スキャン PDF・画像（JPEG/PNG 等） | Gemini Flash OCR |
-| Word / Excel / PowerPoint | Gemini Flash で読み取り |
+| Word / Excel / PowerPoint | officeparser でテキスト抽出 |
 | .txt / .csv / .html 等 | 直接ダウンロード |
 
 ---
@@ -79,7 +79,7 @@ Web チャット UI（ログイン後すぐ使える）
 左メニュー → **APIs & Services → ライブラリ** で以下を有効化:
 
 - `Google Drive API`
-- `Vertex AI API`（ライブラリ上では「Agent Platform API」と表示される場合あり。URL: `https://console.cloud.google.com/apis/library/aiplatform.googleapis.com`）
+- `Vertex AI API`（URL: `https://console.cloud.google.com/apis/library/aiplatform.googleapis.com`）
 
 ### 2-5. OAuth 2.0 クライアント（ログイン用）
 
@@ -103,7 +103,7 @@ Web チャット UI（ログイン後すぐ使える）
 2. 作成後、サービスアカウントをクリック → **キー → キーを追加 → 新しいキーを作成 → JSON**
 3. ダウンロードした JSON ファイルを安全な場所に保存
 4. サービスアカウントのメールアドレス（`nutfes-rag@xxxx.iam.gserviceaccount.com`）をメモ
-5. **IAM と管理 → IAM** でサービスアカウントを選択し、ロール「**Agent Platform ユーザー**」を追加
+5. **IAM と管理 → IAM** でサービスアカウントを選択し、ロール **「Vertex AI ユーザー」** を追加
 
 ### 2-7. Google Drive フォルダをサービスアカウントと共有
 
@@ -130,18 +130,11 @@ https://drive.google.com/drive/folders/【ここがフォルダ ID】
 1. [supabase.com](https://supabase.com) でアカウント作成（GitHub でログイン可）
 2. **New Project** をクリック
    - プロジェクト名: `nutfes-rag`
-   - Database Password: 任意のパスワード（メモしておく）
+   - Database Password: 任意のパスワード（後で使わないので不要）
    - Region: **Northeast Asia (Tokyo)**
 3. 数分待ってプロジェクトが起動するまで待つ
 
-### 3-2. データベーススキーマの作成
-
-1. 左サイドバー → **SQL Editor**
-2. `supabase/schema.sql` の中身を全選択してコピー
-3. エディタに貼り付けて **Run**（▶ ボタン）を押す
-4. エラーなく完了すれば OK
-
-### 3-3. 接続情報の取得
+### 3-2. 接続情報の取得
 
 左サイドバー → **Project Settings → API** で以下をメモ:
 
@@ -149,6 +142,18 @@ https://drive.google.com/drive/folders/【ここがフォルダ ID】
 |------|-----------|------|
 | Project URL | `SUPABASE_URL` | 「URL」欄 |
 | service_role キー | `SUPABASE_SERVICE_KEY` | 「Project API keys」の `service_role`（`anon` ではない方） |
+
+### 3-3. マイグレーション用トークンの取得
+
+データベーススキーマを自動構築するために、Personal Access Token（PAT）が必要です。
+
+1. [supabase.com/dashboard/account/tokens](https://supabase.com/dashboard/account/tokens) を開く
+2. **Generate new token** をクリック
+   - Name: `nutfes-migrate`（任意）
+   - Expires in: **No expiry**
+3. 表示されたトークン（`sbp_...`）をメモ → `SUPABASE_ACCESS_TOKEN` として使用
+
+> このトークンはローカルの `npm run migrate` のみで使用します。Vercel や GitHub Actions には不要です。
 
 ---
 
@@ -182,7 +187,7 @@ ALLOWED_EMAIL_SUFFIX=.nutfes@gmail.com
 # Google Cloud プロジェクト ID── Cloud Console 上部に表示される ID
 GOOGLE_CLOUD_PROJECT=
 
-# Supabase── 3-3 で取得
+# Supabase── 3-2 で取得
 SUPABASE_URL=
 SUPABASE_SERVICE_KEY=
 
@@ -193,11 +198,18 @@ GOOGLE_SERVICE_ACCOUNT_KEY=
 # 同期 API の認証トークン（GitHub Actions / 手動トリガー用）
 # ターミナルで次を実行して貼り付け: openssl rand -base64 32
 CRON_SECRET=
+
+# 大容量 PDF（10MB 超）の OCR に使用する GCS バケット名（任意）
+# 設定しない場合、10MB 超の PDF はスキップされます
+GCS_BUCKET=
+
+# Supabase マイグレーション用── 3-3 で取得（ローカルのみ、Vercel には不要）
+SUPABASE_ACCESS_TOKEN=
 ```
 
 > **`GOOGLE_SERVICE_ACCOUNT_KEY` の貼り付け方**
 > JSON ファイルをテキストエディタで開き、中身を全選択してコピー。
-> .env.local では改行なし・1行で貼り付けてください。
+> `.env.local` では改行なし・1行で貼り付けてください。
 > Vercel のダッシュボードでは複数行のまま貼り付けて構いません。
 
 ### 4-3. Drive の設定
@@ -210,6 +222,16 @@ CRON_SECRET=
   { "edition": 42, "driveId": "フォルダ ID（2-7 で確認）" }
 ]
 ```
+
+### 4-4. データベーススキーマの作成
+
+```bash
+npm run migrate
+```
+
+`4 件のマイグレーションを適用しました。` と表示されれば完了です。
+
+> 今後スキーマを変更する場合は `supabase/migrations/` に SQL ファイルを追加して再実行します。
 
 ---
 
@@ -254,14 +276,15 @@ SYNC_TYPES=docs npm run sync
 ### 実行ログの例
 
 ```
+Drive 同期を開始します...
 対象種別: 全種別（PDF 含む）(SYNC_TYPES=all)
 
 === 第43回 (15XPjdL1z4...) ===
 ファイル一覧を取得中...
 合計 2,648 件 / 未処理 2,648 件 / スキップ 0 件
   埋め込み次元数: 768
-[1/2648] ✓ 43rd_綜合計画書.pdf (12 チャンク)
-[2/2648] ✓ 43rd_シフト表.xlsx (3 チャンク)
+[進捗]    1/2648 ( 0%) | DB保存処理完了:    1 | ... | 43rd_綜合計画書.pdf
+[進捗]    2/2648 ( 0%) | DB保存処理完了:    2 | ... | 43rd_シフト表.xlsx
 ...
 ```
 
@@ -290,10 +313,13 @@ SYNC_TYPES=docs npm run sync
 | `NEXTAUTH_URL` | `https://あなたのURL.vercel.app` | デプロイ後に確定 |
 | `ALLOWED_EMAIL_SUFFIX` | `.nutfes@gmail.com` | |
 | `GOOGLE_CLOUD_PROJECT` | Cloud プロジェクト ID | 2-1（例: `nutfes-rag-497501`）|
-| `SUPABASE_URL` | Supabase の Project URL | 3-3 |
-| `SUPABASE_SERVICE_KEY` | Supabase の service_role キー | 3-3 |
+| `SUPABASE_URL` | Supabase の Project URL | 3-2 |
+| `SUPABASE_SERVICE_KEY` | Supabase の service_role キー | 3-2 |
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | サービスアカウント JSON の中身 | 2-6（複数行 OK）|
 | `CRON_SECRET` | ランダム文字列 | `openssl rand -base64 32` |
+| `GCS_BUCKET` | GCS バケット名 | 任意（大容量 PDF が必要な場合のみ）|
+
+> `SUPABASE_ACCESS_TOKEN` は Vercel には不要です（ローカルの `npm run migrate` 専用）。
 
 ### 6-3. デプロイ
 
@@ -333,6 +359,7 @@ GitHub リポジトリ → **Settings → Secrets and variables → Actions → 
 | `SUPABASE_URL` | Supabase の Project URL |
 | `SUPABASE_SERVICE_KEY` | Supabase の service_role キー |
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | サービスアカウント JSON の中身 |
+| `GCS_BUCKET` | GCS バケット名（任意）|
 
 ### 7-2. 動作確認
 
@@ -357,11 +384,35 @@ GitHub リポジトリ → **Settings → Secrets and variables → Actions → 
 - **Web UI のボタン**: 少量の追加ファイル向け（5分でタイムアウト）
 - **ローカルで `npm run sync`**: 大量ファイル向け（タイムアウトなし）
 
-### インデックス済みデータの確認
+### DB の現状を確認したい場合
 
-Supabase の **Table Editor → documents** でファイル一覧を確認できます。
+```bash
+npm run inspect
+```
 
-### 推定にかかる時間を確認したい場合
+テーブルの存在、回次別チャンク数、embedding の生成状況、マイグレーション適用状況を表示します。
+
+### インデックス済みデータをゼロから作り直したい場合
+
+チャンクサイズ変更後など、全データを再構築したい場合:
+
+```bash
+npm run reindex
+```
+
+> 全ドキュメントを削除してから同期を再実行します。完了まで数時間かかる場合があります。
+
+### スキーマを変更したい場合
+
+```bash
+# 1. 新しいマイグレーションファイルを作成
+# supabase/migrations/005_your_change.sql
+
+# 2. 適用
+npm run migrate
+```
+
+### 所要時間を事前に確認したい場合
 
 ```bash
 npm run estimate
