@@ -149,11 +149,16 @@ async function syncDrive(
           }
         }
         if (raw === undefined) throw new GeminiSkippableError("空のレスポンス");
+
+        // 孤立サロゲートが実際に含まれるか確認（診断ログ）
+        const loneSurrogates = raw.match(/[\uD800-\uDFFF]/gu);
+        if (loneSurrogates && loneSurrogates.length > 0) {
+          console.warn(`⚠ 孤立サロゲート ${loneSurrogates.length} 文字を検出・除去: ${displayName(file.name, file.mimeType)} [mimeType=${file.mimeType}]`);
+        }
+
         const content = raw
           .replace(/\x00/g, "") // eslint-disable-line no-control-regex
-          // 孤立サロゲート（U+D800–U+DFFF）は JSON で無効: PostgREST Aeson が "Empty or invalid json" を返すため除去
-          // /u フラグで有効なサロゲートペア（U+10000以上の文字）を壊さずに孤立サロゲートのみ削除
-          .replace(/[\uD800-\uDFFF]/gu, "");
+          .replace(/[\uD800-\uDFFF]/gu, ""); // 孤立サロゲートは JSON で無効のため除去
 
         if (!content.trim()) {
           empty++;
@@ -176,7 +181,14 @@ async function syncDrive(
           }
 
           const batch = chunks.slice(b, b + EMBED_BATCH_SIZE);
-          const batchEmbeddings = await generateEmbeddingBatch(batch);
+          let batchEmbeddings: number[][];
+          try {
+            batchEmbeddings = await generateEmbeddingBatch(batch);
+          } catch (embedErr: unknown) {
+            const msg = embedErr instanceof Error ? embedErr.message : String(embedErr);
+            console.error(`✗ 埋め込みエラー [mimeType=${file.mimeType}] chunk=${b}: ${displayName(file.name, file.mimeType)}: ${msg}`);
+            throw embedErr;
+          }
 
           if (firstFile && b === 0) {
             console.log(`  埋め込み次元数: ${batchEmbeddings[0]?.length ?? "不明"}`);
@@ -186,16 +198,22 @@ async function syncDrive(
           // 生成直後に DB へ書き込み（全チャンク分メモリに保持しない）
           // upsert → stale削除の順（逆順だとクラッシュ時にデータ消失するため）
           for (let k = 0; k < batch.length; k++) {
-            await upsertDocument({
-              file_id: file.id,
-              chunk_index: b + k,
-              file_name: file.name,
-              content: batch[k],
-              edition,
-              drive_id: driveId,
-              drive_modified_at: file.modifiedTime || undefined,
-              embedding: batchEmbeddings[k],
-            });
+            try {
+              await upsertDocument({
+                file_id: file.id,
+                chunk_index: b + k,
+                file_name: file.name,
+                content: batch[k],
+                edition,
+                drive_id: driveId,
+                drive_modified_at: file.modifiedTime || undefined,
+                embedding: batchEmbeddings[k],
+              });
+            } catch (upsertErr: unknown) {
+              const msg = upsertErr instanceof Error ? upsertErr.message : String(upsertErr);
+              console.error(`✗ DBエラー [mimeType=${file.mimeType}] chunk=${b + k}: ${displayName(file.name, file.mimeType)}: ${msg}`);
+              throw upsertErr;
+            }
             lastWrittenIdx = b + k;
           }
         }
@@ -230,7 +248,7 @@ async function syncDrive(
         }
         errors++;
         completedCount++;
-        console.error(`✗ エラー(要確認): ${displayName(file.name, file.mimeType)}: ${msg}`);
+        console.error(`✗ エラー(要確認) [mimeType=${file.mimeType}]: ${displayName(file.name, file.mimeType)}: ${msg}`);
         printProgress(displayName(file.name, file.mimeType));
       }
     }
