@@ -170,7 +170,11 @@ async function grantPermissions(
         if (
           msg.includes("already has") ||
           msg.includes("403") ||
-          msg.includes("cannotShareTeamDriveTopFolderWithAnyoneOrDomains")
+          msg.includes("cannotShareTeamDriveTopFolderWithAnyoneOrDomains") ||
+          msg.includes("File not found") ||
+          msg.includes("共有の権限がありません") ||
+          msg.includes("sharingNotSupported") ||
+          msg.includes("404")
         ) {
           skipped++;
         } else {
