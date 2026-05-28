@@ -75,12 +75,13 @@ async function getOAuthClient() {
 const CONCURRENCY = 20;
 const FOLDER_CONCURRENCY = 20;
 
-async function listAllFileIds(
+async function listAllIds(
   drive: ReturnType<typeof google.drive>,
   folderId: string
-): Promise<string[]> {
+): Promise<{ folderIds: string[]; fileIds: string[] }> {
+  const folderIds: string[] = [folderId]; // ルートフォルダ自身も含める
   const fileIds: string[] = [];
-  const seenIds = new Set<string>();
+  const seenIds = new Set<string>([folderId]);
   // BFS: 現在の深さのフォルダを並列処理し、次の深さへ進む
   let currentLevel: string[] = [folderId];
   let folderCount = 0;
@@ -111,6 +112,10 @@ async function listAllFileIds(
               if (!f.id) continue;
               if (f.mimeType === "application/vnd.google-apps.folder") {
                 subFolders.push(f.id);
+                if (!seenIds.has(f.id)) {
+                  seenIds.add(f.id);
+                  folderIds.push(f.id); // サブフォルダも収集
+                }
               } else if (f.mimeType === "application/vnd.google-apps.shortcut") {
                 // ショートカットはリンク先の実体ファイルに権限付与する
                 const targetId = (f as { shortcutDetails?: { targetId?: string } }).shortcutDetails?.targetId;
@@ -132,13 +137,13 @@ async function listAllFileIds(
 
       folderCount += batch.length;
       for (const subFolders of subFolderGroups) nextLevel.push(...subFolders);
-      process.stdout.write(`  フォルダ探索中: ${folderCount} フォルダ目, ファイル ${fileIds.length} 件\n`);
+      process.stdout.write(`  フォルダ探索中: ${folderCount} フォルダ目, フォルダ ${folderIds.length} 件 / ファイル ${fileIds.length} 件\n`);
     }
 
     currentLevel = nextLevel;
   }
 
-  return fileIds;
+  return { folderIds, fileIds };
 }
 
 async function grantPermissions(
@@ -209,12 +214,13 @@ async function main() {
 
   for (const { edition, driveId } of drives) {
     console.log(`\n--- 第${edition}回 (${driveId}) ---`);
-    console.log("ファイル一覧を取得中...");
+    console.log("ファイル・フォルダ一覧を取得中...");
 
-    const fileIds = await listAllFileIds(drive, driveId);
-    console.log(`${fileIds.length} 件のファイルに権限を付与します（並列${CONCURRENCY}）`);
+    const { folderIds, fileIds } = await listAllIds(drive, driveId);
+    const allIds = [...folderIds, ...fileIds];
+    console.log(`フォルダ ${folderIds.length} 件 + ファイル ${fileIds.length} 件 = 計 ${allIds.length} 件に権限を付与します（並列${CONCURRENCY}）`);
 
-    const { granted, skipped, errors } = await grantPermissions(drive, fileIds);
+    const { granted, skipped, errors } = await grantPermissions(drive, allIds);
     totalGranted += granted;
     totalSkipped += skipped;
     totalErrors += errors;
