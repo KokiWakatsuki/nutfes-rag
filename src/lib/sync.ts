@@ -151,14 +151,15 @@ async function syncDrive(
         if (raw === undefined) throw new GeminiSkippableError("空のレスポンス");
 
         // 孤立サロゲートが実際に含まれるか確認（診断ログ）
-        const loneSurrogates = raw.match(/[\uD800-\uDFFF]/gu);
+        // NOTE: /u フラグなし — /u モードでは孤立サロゲートをコードポイントとして扱えず検出できないため
+        const loneSurrogates = raw.match(/[\uD800-\uDFFF]/g);
         if (loneSurrogates && loneSurrogates.length > 0) {
           console.warn(`⚠ 孤立サロゲート ${loneSurrogates.length} 文字を検出・除去: ${displayName(file.name, file.mimeType)} [mimeType=${file.mimeType}]`);
         }
 
         const content = raw
           .replace(/\x00/g, "") // eslint-disable-line no-control-regex
-          .replace(/[\uD800-\uDFFF]/gu, ""); // 孤立サロゲートは JSON で無効のため除去
+          .replace(/[\uD800-\uDFFF]/g, ""); // 孤立サロゲートは JSON で無効のため除去（/u フラグなし）
 
         if (!content.trim()) {
           empty++;
@@ -198,23 +199,38 @@ async function syncDrive(
           // 生成直後に DB へ書き込み（全チャンク分メモリに保持しない）
           // upsert → stale削除の順（逆順だとクラッシュ時にデータ消失するため）
           for (let k = 0; k < batch.length; k++) {
+            const chunkIdx = b + k;
+            const chunkText = batch[k];
             try {
               await upsertDocument({
                 file_id: file.id,
-                chunk_index: b + k,
+                chunk_index: chunkIdx,
                 file_name: file.name,
-                content: batch[k],
+                content: chunkText,
                 edition,
                 drive_id: driveId,
                 drive_modified_at: file.modifiedTime || undefined,
                 embedding: batchEmbeddings[k],
               });
             } catch (upsertErr: unknown) {
-              const msg = upsertErr instanceof Error ? upsertErr.message : String(upsertErr);
-              console.error(`✗ DBエラー [mimeType=${file.mimeType}] chunk=${b + k}: ${displayName(file.name, file.mimeType)}: ${msg}`);
+              // PostgrestError は Error サブクラスではないため message を直接参照する
+              const errObj = upsertErr as { message?: string; code?: string; details?: string };
+              const msg = errObj.message ?? String(upsertErr);
+              // chunk内容の診断情報を出力して根本原因を特定する
+              const wellFormed = chunkText.isWellFormed?.() ?? "N/A";
+              const codePoints: string[] = [];
+              for (let ci = 0; ci < Math.min(chunkText.length, 20); ci++) {
+                const cp = chunkText.codePointAt(ci);
+                if (cp !== undefined && (cp < 0x20 || cp >= 0xD800)) {
+                  codePoints.push(`U+${cp.toString(16).toUpperCase().padStart(4, "0")}@${ci}`);
+                }
+              }
+              console.error(`✗ DBエラー [mimeType=${file.mimeType}] chunk=${chunkIdx} len=${chunkText.length} wellFormed=${wellFormed} suspectedCP=[${codePoints.join(",")}]: ${displayName(file.name, file.mimeType)}: code=${errObj.code} ${msg}`);
+              console.error(`  chunk先頭100: ${JSON.stringify(chunkText.slice(0, 100))}`);
+              console.error(`  chunk末尾100: ${JSON.stringify(chunkText.slice(-100))}`);
               throw upsertErr;
             }
-            lastWrittenIdx = b + k;
+            lastWrittenIdx = chunkIdx;
           }
         }
 
