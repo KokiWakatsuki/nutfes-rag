@@ -295,11 +295,19 @@ export async function fetchFileContent(
 
   // Office ファイル → officeparser でテキスト抽出
   if (OFFICE_EXTRACT_TYPES.has(mimeType)) {
-    const res = await drive.files.get(
-      { fileId, alt: "media" },
-      { responseType: "arraybuffer" }
-    );
-    const buf = Buffer.from(res.data as ArrayBuffer);
+    let buf: Buffer;
+    try {
+      const res = await drive.files.get(
+        { fileId, alt: "media" },
+        { responseType: "arraybuffer" }
+      );
+      buf = Buffer.from(res.data as ArrayBuffer);
+    } catch (downloadErr: unknown) {
+      const msg = downloadErr instanceof Error ? downloadErr.message : String(downloadErr);
+      const isTransient = msg.includes("ETIMEDOUT") || msg.includes("ECONNRESET") || msg.includes("ENOTFOUND") || msg.includes("fetch failed");
+      if (isTransient) throw downloadErr;
+      throw new GeminiSkippableError(`Driveダウンロード失敗: ${msg.slice(0, 120)}`);
+    }
     const ext = MIME_TO_EXT[mimeType] ?? "bin";
     const uid = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const tmpPath = join(tmpdir(), `office-${uid}.${ext}`);
@@ -327,8 +335,10 @@ export async function fetchFileContent(
           throw new GeminiSkippableError(`LibreOffice変換後ファイルが見つかりません: ${convertedPath}`);
         }
         try {
+          // officeparser v7+ は AST オブジェクトを返す（v6 以前は文字列）
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          return String((await (officeParser as any).parseOffice(convertedPath)) ?? "");
+          const ast = await (officeParser as any).parseOffice(convertedPath);
+          return typeof ast?.toText === "function" ? (ast.toText() ?? "") : String(ast ?? "");
         } catch (parseErr) {
           const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
           throw new GeminiSkippableError(`変換後のOfficeファイル解析失敗: ${msg.slice(0, 120)}`);
@@ -336,8 +346,10 @@ export async function fetchFileContent(
           try { unlinkSync(convertedPath); } catch {}
         }
       }
+      // officeparser v7+ は AST オブジェクトを返す（v6 以前は文字列）
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return String((await (officeParser as any).parseOffice(tmpPath)) ?? "");
+      const ast = await (officeParser as any).parseOffice(tmpPath);
+      return typeof ast?.toText === "function" ? (ast.toText() ?? "") : String(ast ?? "");
     } catch (err) {
       if (err instanceof GeminiSkippableError) throw err;
       // officeparser が破損ファイルや非対応形式でエラーを投げた場合は永続的スキップ
@@ -350,11 +362,19 @@ export async function fetchFileContent(
 
   // PDF・画像 → バイナリダウンロード後に処理
   if (GEMINI_EXTRACT_TYPES.has(mimeType)) {
-    const res = await drive.files.get(
-      { fileId, alt: "media" },
-      { responseType: "arraybuffer" }
-    );
-    let buf = Buffer.from(res.data as ArrayBuffer);
+    let buf: Buffer;
+    try {
+      const res = await drive.files.get(
+        { fileId, alt: "media" },
+        { responseType: "arraybuffer" }
+      );
+      buf = Buffer.from(res.data as ArrayBuffer);
+    } catch (downloadErr: unknown) {
+      const msg = downloadErr instanceof Error ? downloadErr.message : String(downloadErr);
+      const isTransient = msg.includes("ETIMEDOUT") || msg.includes("ECONNRESET") || msg.includes("ENOTFOUND") || msg.includes("fetch failed");
+      if (isTransient) throw downloadErr;
+      throw new GeminiSkippableError(`Driveダウンロード失敗: ${msg.slice(0, 120)}`);
+    }
 
     // テキストPDF: pdf-parse で高速処理（APIコスト不要）
     if (mimeType === "application/pdf") {
