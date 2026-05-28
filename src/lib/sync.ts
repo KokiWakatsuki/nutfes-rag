@@ -149,7 +149,11 @@ async function syncDrive(
           }
         }
         if (raw === undefined) throw new GeminiSkippableError("空のレスポンス");
-        const content = raw.replace(/\x00/g, ""); // eslint-disable-line no-control-regex
+        const content = raw
+          .replace(/\x00/g, "") // eslint-disable-line no-control-regex
+          // 孤立サロゲート（U+D800–U+DFFF）は JSON で無効: PostgREST Aeson が "Empty or invalid json" を返すため除去
+          // /u フラグで有効なサロゲートペア（U+10000以上の文字）を壊さずに孤立サロゲートのみ削除
+          .replace(/[\uD800-\uDFFF]/gu, "");
 
         if (!content.trim()) {
           empty++;

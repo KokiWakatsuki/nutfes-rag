@@ -277,20 +277,34 @@ async function fetchFileContentImpl(
   // Google Workspace → Drive export API（テキスト変換はGoogleが行う）
   const exportMime = EXPORTABLE_MIME_TYPES[mimeType];
   if (exportMime) {
-    const res = await drive.files.export(
-      { fileId, mimeType: exportMime },
-      { responseType: "text" }
-    );
-    return String(res.data);
+    try {
+      const res = await drive.files.export(
+        { fileId, mimeType: exportMime },
+        { responseType: "text" }
+      );
+      return String(res.data);
+    } catch (exportErr: unknown) {
+      const msg = exportErr instanceof Error ? exportErr.message : String(exportErr);
+      const isTransient = msg.includes("ETIMEDOUT") || msg.includes("ECONNRESET") || msg.includes("ENOTFOUND") || msg.includes("fetch failed");
+      if (isTransient) throw exportErr;
+      throw new GeminiSkippableError(`Driveエクスポート失敗: ${msg.slice(0, 120)}`);
+    }
   }
 
   // テキスト系 → 直接ダウンロード
   if (TEXT_DOWNLOAD_TYPES.has(mimeType)) {
-    const res = await drive.files.get(
-      { fileId, alt: "media" },
-      { responseType: "arraybuffer" }
-    );
-    return Buffer.from(res.data as ArrayBuffer).toString("utf-8");
+    try {
+      const res = await drive.files.get(
+        { fileId, alt: "media" },
+        { responseType: "arraybuffer" }
+      );
+      return Buffer.from(res.data as ArrayBuffer).toString("utf-8");
+    } catch (downloadErr: unknown) {
+      const msg = downloadErr instanceof Error ? downloadErr.message : String(downloadErr);
+      const isTransient = msg.includes("ETIMEDOUT") || msg.includes("ECONNRESET") || msg.includes("ENOTFOUND") || msg.includes("fetch failed");
+      if (isTransient) throw downloadErr;
+      throw new GeminiSkippableError(`Driveダウンロード失敗: ${msg.slice(0, 120)}`);
+    }
   }
 
   // Office ファイル → officeparser でテキスト抽出
@@ -304,9 +318,6 @@ async function fetchFileContentImpl(
       buf = Buffer.from(res.data as ArrayBuffer);
     } catch (downloadErr: unknown) {
       const msg = downloadErr instanceof Error ? downloadErr.message : String(downloadErr);
-      const status = (downloadErr as { response?: { status?: number } })?.response?.status;
-      const resData = (downloadErr as { response?: { data?: unknown } })?.response?.data;
-      console.error(`[Drive DL error] fileId=${fileId} mimeType=${mimeType} status=${status} msg=${msg.slice(0, 120)} resData=${JSON.stringify(resData)?.slice(0, 200)}`);
       const isTransient = msg.includes("ETIMEDOUT") || msg.includes("ECONNRESET") || msg.includes("ENOTFOUND") || msg.includes("fetch failed");
       if (isTransient) throw downloadErr;
       throw new GeminiSkippableError(`Driveダウンロード失敗: ${msg.slice(0, 120)}`);
@@ -413,7 +424,6 @@ async function fetchFileContentImpl(
 }
 
 // 外側ラッパー: fetchFileContentImpl から漏れた全エラーをネットワーク系以外は GeminiSkippableError に変換
-// （内部の個別 catch が tsx ESM/CJS 境界で機能しない場合の保険）
 export async function fetchFileContent(
   fileId: string,
   mimeType: string
@@ -424,8 +434,6 @@ export async function fetchFileContent(
     const errName = (err as Error)?.name;
     const msg = err instanceof Error ? err.message : String(err);
     const isSkippable = err instanceof GeminiSkippableError || errName === "GeminiSkippableError";
-    // 外側ラッパーに届いたエラーの詳細を出力（どのパスで catch されなかったかを診断）
-    console.error(`[fetchFileContent outer catch] fileId=${fileId} mimeType=${mimeType} isSkippable=${isSkippable} name=${errName} msg=${msg.slice(0, 120)}`);
     if (isSkippable) throw err;
     const isTransient = msg.includes("ETIMEDOUT") || msg.includes("ECONNRESET") || msg.includes("ENOTFOUND") || msg.includes("fetch failed");
     if (isTransient) throw err;
