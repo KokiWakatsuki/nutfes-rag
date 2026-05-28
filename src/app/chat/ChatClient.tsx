@@ -138,9 +138,17 @@ export default function ChatClient({
       });
 
       if (!res.ok || !res.body) {
+        let errorMsg = "エラーが発生しました。";
+        if (res.status === 429) errorMsg = "リクエストが多すぎます。しばらく待ってから再度お試しください。";
+        else if (res.status === 503 || res.status === 500) {
+          try {
+            const errData = await res.json() as { error?: string };
+            if (errData.error) errorMsg = `エラー: ${errData.error}`;
+          } catch {}
+        }
         setMessages((prev) => {
           const msgs = [...prev];
-          msgs[msgs.length - 1] = { role: "assistant", content: "エラーが発生しました。" };
+          msgs[msgs.length - 1] = { role: "assistant", content: errorMsg };
           return msgs;
         });
         return;
@@ -489,7 +497,7 @@ export default function ChatClient({
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault();
                   handleSubmit(e as unknown as React.FormEvent);
                 }
