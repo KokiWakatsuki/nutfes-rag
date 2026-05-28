@@ -5,7 +5,7 @@ on:
 
 concurrency:
   group: drive-sync
-  cancel-in-progress: false  # 実行中の方を優先し、後から来た方はキューで待機
+  cancel-in-progress: true  # 手動reindexを優先: 実行中のsync/reindexをキャンセルして即開始
 
 jobs:
   reindex:

@@ -14,10 +14,17 @@ async function main() {
   );
 
   console.log("⚠️  documents テーブルの全レコードを削除します...");
-  // TRUNCATE で確実に全件削除（delete は行数制限で不完全になる場合がある）
   const { error } = await supabase.rpc("truncate_documents");
   if (error) throw new Error(`削除失敗: ${error.message}`);
-  console.log("✅ 削除完了。同期を開始します...\n");
+
+  // 削除が完全に完了したか件数で確認
+  const { count, error: countError } = await supabase
+    .from("documents")
+    .select("*", { count: "exact", head: true });
+  if (countError) throw new Error(`削除確認エラー: ${countError.message}`);
+  if (count && count > 0) throw new Error(`TRUNCATE後もデータが残っています: ${count}件。再実行してください。`);
+
+  console.log("✅ 削除確認OK（0件）。同期を開始します...\n");
 
   const result = await syncAllDrives();
   console.log(`\n=== 再インデックス完了 ===`);
