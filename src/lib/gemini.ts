@@ -273,17 +273,37 @@ ${contextText}`;
   return { systemInstruction: { parts: [{ text: systemInstruction }] }, contents };
 }
 
-function parseStreamLine(line: string): string | null {
-  const trimmed = line.trim().replace(/^[,\[]+/, "").replace(/\]+$/, "");
-  if (!trimmed) return null;
-  try {
-    const json = JSON.parse(trimmed) as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-    };
-    return json.candidates?.[0]?.content?.parts?.[0]?.text ?? null;
-  } catch {
-    return null;
+type GeminiStreamChunk = {
+  candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+};
+
+// バッファから完全な JSON オブジェクト {} を切り出す（複数行 JSON 対応）
+function extractObjects(buf: string): { objects: GeminiStreamChunk[]; remaining: string } {
+  const objects: GeminiStreamChunk[] = [];
+  let i = 0;
+  while (i < buf.length) {
+    while (i < buf.length && buf[i] !== "{") i++;
+    if (i >= buf.length) break;
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    let j = i;
+    while (j < buf.length) {
+      const c = buf[j];
+      if (esc) { esc = false; }
+      else if (c === "\\" && inStr) { esc = true; }
+      else if (c === '"') { inStr = !inStr; }
+      else if (!inStr) {
+        if (c === "{") depth++;
+        else if (c === "}") { depth--; if (depth === 0) { break; } }
+      }
+      j++;
+    }
+    if (depth !== 0) break; // オブジェクトが未完了 → 残りをバッファへ
+    try { objects.push(JSON.parse(buf.slice(i, j + 1)) as GeminiStreamChunk); } catch { /* skip */ }
+    i = j + 1;
   }
+  return { objects, remaining: buf.slice(i) };
 }
 
 // ストリーミング回答生成（async generator）
@@ -311,25 +331,23 @@ export async function* streamGenerateAnswer(
   const decoder = new TextDecoder();
   let remainder = "";
 
-  let firstChunkLogged = false;
   try {
     while (true) {
       const { done, value } = await reader.read();
-      if (done) {
-        if (!firstChunkLogged) console.error("[stream-diag] stream ended with no chunks. remainder:", JSON.stringify(remainder.slice(0, 500)));
-        const text = parseStreamLine(remainder);
-        if (text) yield text;
-        return;
-      }
+      if (done) break;
       remainder += decoder.decode(value, { stream: true });
-      if (!firstChunkLogged) {
-        console.log("[stream-diag] first raw chunk:", JSON.stringify(remainder.slice(0, 500)));
-        firstChunkLogged = true;
+      const { objects, remaining } = extractObjects(remainder);
+      remainder = remaining;
+      for (const obj of objects) {
+        const text = obj.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) yield text;
       }
-      const lines = remainder.split("\n");
-      remainder = lines.pop() ?? "";
-      for (const line of lines) {
-        const text = parseStreamLine(line);
+    }
+    // ストリーム終了後に残ったバッファを処理
+    if (remainder.trim()) {
+      const { objects } = extractObjects(remainder);
+      for (const obj of objects) {
+        const text = obj.candidates?.[0]?.content?.parts?.[0]?.text;
         if (text) yield text;
       }
     }
