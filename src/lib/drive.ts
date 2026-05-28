@@ -304,6 +304,9 @@ async function fetchFileContentImpl(
       buf = Buffer.from(res.data as ArrayBuffer);
     } catch (downloadErr: unknown) {
       const msg = downloadErr instanceof Error ? downloadErr.message : String(downloadErr);
+      const status = (downloadErr as { response?: { status?: number } })?.response?.status;
+      const resData = (downloadErr as { response?: { data?: unknown } })?.response?.data;
+      console.error(`[Drive DL error] fileId=${fileId} mimeType=${mimeType} status=${status} msg=${msg.slice(0, 120)} resData=${JSON.stringify(resData)?.slice(0, 200)}`);
       const isTransient = msg.includes("ETIMEDOUT") || msg.includes("ECONNRESET") || msg.includes("ENOTFOUND") || msg.includes("fetch failed");
       if (isTransient) throw downloadErr;
       throw new GeminiSkippableError(`Driveダウンロード失敗: ${msg.slice(0, 120)}`);
@@ -418,8 +421,12 @@ export async function fetchFileContent(
   try {
     return await fetchFileContentImpl(fileId, mimeType);
   } catch (err) {
-    if (err instanceof GeminiSkippableError || (err as Error)?.name === "GeminiSkippableError") throw err;
+    const errName = (err as Error)?.name;
     const msg = err instanceof Error ? err.message : String(err);
+    const isSkippable = err instanceof GeminiSkippableError || errName === "GeminiSkippableError";
+    // 外側ラッパーに届いたエラーの詳細を出力（どのパスで catch されなかったかを診断）
+    console.error(`[fetchFileContent outer catch] fileId=${fileId} mimeType=${mimeType} isSkippable=${isSkippable} name=${errName} msg=${msg.slice(0, 120)}`);
+    if (isSkippable) throw err;
     const isTransient = msg.includes("ETIMEDOUT") || msg.includes("ECONNRESET") || msg.includes("ENOTFOUND") || msg.includes("fetch failed");
     if (isTransient) throw err;
     throw new GeminiSkippableError(`ファイル処理失敗: ${msg.slice(0, 120)}`);
