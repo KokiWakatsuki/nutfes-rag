@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
-import { generateEmbedding, streamGenerateAnswer } from "@/lib/gemini";
+import { generateEmbedding, streamGenerateAnswer, expandQueryTerms } from "@/lib/gemini";
 import {
   searchDocuments,
   createChatSession,
@@ -51,16 +51,17 @@ export async function POST(req: NextRequest) {
   const filterEditions: number[] | null =
     Array.isArray(editions) && editions.length > 0 ? editions : null;
 
-  // セッション管理と埋め込み生成を並列実行
-  const [{ sessionId: currentSessionId, history }, embedding] = await Promise.all([
+  // セッション管理・埋め込み生成・クエリ展開を並列実行
+  const [{ sessionId: currentSessionId, history }, embedding, expandedQuery] = await Promise.all([
     setupSession(userEmail, sessionId ?? null, question, filterEditions),
     generateEmbedding(question),
+    expandQueryTerms(question),
   ]);
 
   // ユーザーメッセージ保存と文書検索を並列実行
   const [, docs] = await Promise.all([
     saveChatMessage(currentSessionId, "user", question, []),
-    searchDocuments(embedding, filterEditions, 8, question),
+    searchDocuments(embedding, filterEditions, 8, expandedQuery),
   ]);
 
   // ファイルIDでソース重複排除

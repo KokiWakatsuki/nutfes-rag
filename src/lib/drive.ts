@@ -149,6 +149,7 @@ export interface DriveFile {
   name: string;
   mimeType: string;
   modifiedTime: string;
+  createdTime: string;
   folderPath: string; // 例: "第43回技大祭 > 01_43rd_執行部 > 01_43rd_執行部MT"
 }
 
@@ -229,7 +230,7 @@ async function listAllFilesFlat(
       includeItemsFromAllDrives: true,
       supportsAllDrives: true,
       q: "trashed = false and mimeType != 'application/vnd.google-apps.folder'",
-      fields: "nextPageToken, files(id, name, mimeType, modifiedTime, parents)",
+      fields: "nextPageToken, files(id, name, mimeType, modifiedTime, createdTime, parents)",
       pageSize: 1000,
       pageToken,
     });
@@ -244,6 +245,7 @@ async function listAllFilesFlat(
           name: f.name,
           mimeType: f.mimeType,
           modifiedTime: f.modifiedTime ?? "",
+          createdTime: f.createdTime ?? "",
           folderPath: parentId ? (folderPathMap.get(parentId) ?? "") : "",
         });
       }
@@ -283,7 +285,7 @@ async function listAllFilesParallel(
           q: `'${parentId}' in parents and trashed = false`,
           includeItemsFromAllDrives: true,
           supportsAllDrives: true,
-          fields: "nextPageToken, files(id, name, mimeType, modifiedTime)",
+          fields: "nextPageToken, files(id, name, mimeType, modifiedTime, createdTime)",
           pageToken,
           pageSize: 1000,
         });
@@ -299,6 +301,7 @@ async function listAllFilesParallel(
               name: f.name,
               mimeType: f.mimeType,
               modifiedTime: f.modifiedTime ?? "",
+              createdTime: f.createdTime ?? "",
               folderPath: currentPath,
             });
           }

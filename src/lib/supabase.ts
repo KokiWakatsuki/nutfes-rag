@@ -20,6 +20,7 @@ export interface Document {
   edition: number;
   drive_id: string;
   drive_modified_at?: string;
+  drive_created_at?: string;
   embedding?: number[];
   created_at: string;
   updated_at: string;
@@ -82,6 +83,7 @@ export async function upsertDocument(doc: {
   edition: number;
   drive_id: string;
   drive_modified_at?: string;
+  drive_created_at?: string;
   embedding: number[];
 }): Promise<void> {
   const { error } = await getSupabase()

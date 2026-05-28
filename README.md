@@ -105,21 +105,64 @@ Web チャット UI（ログイン後すぐ使える）
 4. サービスアカウントのメールアドレス（`nutfes-rag@xxxx.iam.gserviceaccount.com`）をメモ
 5. **IAM と管理 → IAM** でサービスアカウントを選択し、ロール **「Vertex AI ユーザー」** を追加
 
-### 2-7. Google Drive フォルダをサービスアカウントと共有
+### 2-7. サービスアカウントに Drive へのアクセス権を付与
 
-**各回次のフォルダそれぞれで**以下を実施:
+Google Drive のファイルはフォルダを共有しても、ファイル個別の権限がないとサービスアカウントからアクセスできません。`scripts/grant-permissions.ts` を使って、対象フォルダ以下の全ファイルにサービスアカウントの閲覧権限を一括付与します。
 
-1. Google Drive でフォルダを右クリック → **共有**
-2. サービスアカウントのメールアドレスを入力
-3. 権限: **閲覧者** を選択して共有
+#### フォルダ ID の確認
 
-**フォルダ ID の確認方法:**
+URL からフォルダ ID を確認し、`config/drives.json` に設定します（[4-3](#4-3-drive-の設定)で行います）:
 
 ```
 https://drive.google.com/drive/folders/【ここがフォルダ ID】
 ```
 
-このフォルダ ID を `config/drives.json` に設定します。
+#### OAuth リダイレクト URI を追加
+
+**APIs & Services → 認証情報 → OAuth クライアント ID** を編集し、**承認済みのリダイレクト URI** に追加:
+
+```
+http://localhost:8888/callback
+```
+
+#### テストユーザーを追加
+
+**APIs & Services → OAuth 同意画面 → テストユーザー** にあなたの Google アカウントを追加。
+
+#### リフレッシュトークンの取得（初回のみ）
+
+```bash
+tsx --env-file=.env.local scripts/get-refresh-token.ts
+```
+
+ブラウザで認証すると、ターミナルにリフレッシュトークンが表示されます。
+
+GitHub リポジトリ → **Settings → Secrets and variables → Actions → New repository secret** で以下を登録:
+
+| Secret 名 | 値 |
+|----------|----|
+| `GOOGLE_CLIENT_ID` | Google の Client ID（2-5 で取得）|
+| `GOOGLE_CLIENT_SECRET` | Google の Client Secret（2-5 で取得）|
+| `GOOGLE_REFRESH_TOKEN` | 表示されたリフレッシュトークン |
+
+> **⚠️ トークンの有効期限について**  
+> OAuth 同意画面が「テスト」モードの場合、リフレッシュトークンは **7日間**で失効します。  
+> OAuth 同意画面 → **「アプリを公開」→「確認」** で「本番環境」に変更すると有効期限がなくなります（6ヶ月間未使用で失効）。
+
+#### 権限付与の実行
+
+初回は `config/drives.json` に全ドライブを設定してから実行してください。
+
+```bash
+# ローカルで実行（ブラウザ認証）
+tsx --env-file=.env.local scripts/grant-permissions.ts
+```
+
+または GitHub Actions から手動実行（Secrets 登録後）:
+
+**Actions タブ → Grant Service Account Permissions → Run workflow**
+
+完了まで数分〜数十分かかります（ファイル数に比例）。再実行は安全です（既付与ファイルは自動スキップ）。
 
 ---
 
@@ -353,6 +396,8 @@ https://あなたのURL.vercel.app
 
 GitHub リポジトリ → **Settings → Secrets and variables → Actions → New repository secret** で以下を登録:
 
+**Daily Drive Sync 用:**
+
 | Secret 名 | 値 |
 |----------|----|
 | `GOOGLE_CLOUD_PROJECT` | Cloud プロジェクト ID（例: `nutfes-rag-497501`）|
@@ -361,9 +406,18 @@ GitHub リポジトリ → **Settings → Secrets and variables → Actions → 
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | サービスアカウント JSON の中身 |
 | `GCS_BUCKET` | GCS バケット名（任意）|
 
+**Grant Service Account Permissions 用（2-7 で登録済みの場合はスキップ）:**
+
+| Secret 名 | 値 |
+|----------|----|
+| `GOOGLE_CLIENT_ID` | Google の Client ID |
+| `GOOGLE_CLIENT_SECRET` | Google の Client Secret |
+| `GOOGLE_REFRESH_TOKEN` | `get-refresh-token.ts` で取得したトークン |
+
 ### 7-2. 動作確認
 
-**Actions タブ → Daily Drive Sync → Run workflow** で手動実行して確認。
+- **Actions タブ → Daily Drive Sync → Run workflow** で同期の手動実行を確認
+- **Actions タブ → Grant Service Account Permissions → Run workflow** で権限付与の動作を確認
 
 ---
 
@@ -371,12 +425,12 @@ GitHub リポジトリ → **Settings → Secrets and variables → Actions → 
 
 ### 新しい回次の Drive を追加する
 
-1. サービスアカウントと対象フォルダを共有（閲覧者権限）
-2. `config/drives.json` に追加:
+1. `config/drives.json` に追加:
    ```json
    { "edition": 44, "driveId": "新しいフォルダの ID" }
    ```
-3. `git push` → Vercel が自動デプロイ
+2. `git push` → Vercel が自動デプロイ
+3. **Actions → Grant Service Account Permissions → Run workflow** でサービスアカウントに権限付与
 4. ローカルで `npm run sync` を実行（初回のみ大量処理）
 
 ### 手動で同期したい場合
@@ -441,10 +495,11 @@ Google アカウントを変更したとき（例: 新しい Cloud アカウン�
 
 | 項目 | 更新箇所 |
 |-----|---------|
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | `.env.local` / Vercel 環境変数 |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | `.env.local` / Vercel 環境変数 / GitHub Secrets |
 | `GOOGLE_CLOUD_PROJECT` | `.env.local` / Vercel 環境変数 / GitHub Secrets |
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | `.env.local` / Vercel 環境変数 / GitHub Secrets |
-| Google Drive フォルダの共有設定 | 新サービスアカウントのメールで再共有 |
+| `GOOGLE_REFRESH_TOKEN` | GitHub Secrets（`get-refresh-token.ts` で再取得）|
+| Google Drive ファイルへのアクセス権付与 | **Actions → Grant Service Account Permissions** を再実行 |
 | Google OAuth のリダイレクト URI | 新プロジェクトの認証情報に Vercel URL を追加 |
 
 ### 更新不要なもの

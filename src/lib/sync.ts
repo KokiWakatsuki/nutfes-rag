@@ -214,6 +214,7 @@ async function syncDrive(
                 edition,
                 drive_id: driveId,
                 drive_modified_at: file.modifiedTime || undefined,
+                drive_created_at: file.createdTime || undefined,
                 embedding: batchEmbeddings[k],
               });
             } catch (upsertErr: unknown) {

@@ -72,7 +72,7 @@ export async function generateEmbeddingBatch(texts: string[]): Promise<number[][
   return data.predictions.map((p) => p.embeddings.values);
 }
 
-const OCR_PROMPT = "このファイルに含まれるテキストをすべて書き起こしてください。表・図・画像内の文字も含めてください。書き起こした内容のみを出力してください。";
+const OCR_PROMPT = "このファイルに含まれるすべての情報を抽出してください。テキストはそのまま書き起こし、図・画像・レイアウト図・配置図などテキスト以外の要素も内容と構造を詳しく説明してください。出力はテキストのみでお願いします。";
 
 // 永続的にスキップすべきエラー（リトライしても無意味）
 export class GeminiSkippableError extends Error {
@@ -244,13 +244,25 @@ export async function extractFileContent(
   return uploadToGcsAndExtract(storage, buffer, mimeType);
 }
 
+function formatDate(iso?: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+}
+
 function buildAnswerRequest(
   question: string,
-  contexts: Array<{ file_name: string; content: string; edition: number }>,
+  contexts: Array<{ file_name: string; content: string; edition: number; drive_created_at?: string | null; drive_modified_at?: string | null }>,
   history: Array<{ role: "user" | "assistant"; content: string }>
 ) {
   const contextText = contexts
-    .map((c, i) => `【資料 ${i + 1}: ${c.file_name}（第${c.edition}回）】\n${c.content}`)
+    .map((c, i) => {
+      const dateParts: string[] = [];
+      if (c.drive_created_at) dateParts.push(`作成: ${formatDate(c.drive_created_at)}`);
+      if (c.drive_modified_at) dateParts.push(`更新: ${formatDate(c.drive_modified_at)}`);
+      const dateSuffix = dateParts.length > 0 ? `｜${dateParts.join("、")}` : "";
+      return `【資料 ${i + 1}: ${c.file_name}（第${c.edition}回）${dateSuffix}】\n${c.content}`;
+    })
     .join("\n\n---\n\n");
 
   const systemInstruction = `あなたは学祭実行委員のAIアシスタントです。
@@ -258,6 +270,7 @@ function buildAnswerRequest(
 回答はMarkdown形式で、見出し・箇条書き・表などを適切に使って読みやすく整形してください。
 資料に記載されていない内容については「資料には記載がありません」と明示してください。
 前の会話の内容も考慮して回答してください。
+資料に作成日・更新日が記載されている場合、日付に関する質問には積極的に活用してください。
 
 【参考資料】
 ${contextText}`;
@@ -306,10 +319,38 @@ function extractObjects(buf: string): { objects: GeminiStreamChunk[]; remaining:
   return { objects, remaining: buf.slice(i) };
 }
 
+// クエリ展開: 同義語・別称を補完した検索テキストを生成（タイムアウト時は原文を返す）
+export async function expandQueryTerms(question: string): Promise<string> {
+  try {
+    const token = await getAccessToken();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3_000);
+    let res: Response;
+    try {
+      res = await fetch(vertexUrl(CHAT_MODEL, "generateContent"), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: `学祭・イベント運営の文書検索用です。以下の質問に含まれる用語の同義語・別称・略称をスペース区切りで追記した検索クエリを1行だけ出力してください（元の質問も含める・説明不要）。\n\n質問: ${question}` }] }],
+          generationConfig: { maxOutputTokens: 80, temperature: 0 },
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!res.ok) return question;
+    const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+    return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || question;
+  } catch {
+    return question;
+  }
+}
+
 // ストリーミング回答生成（async generator）
 export async function* streamGenerateAnswer(
   question: string,
-  contexts: Array<{ file_name: string; content: string; edition: number }>,
+  contexts: Array<{ file_name: string; content: string; edition: number; drive_created_at?: string | null; drive_modified_at?: string | null }>,
   history: Array<{ role: "user" | "assistant"; content: string }> = []
 ): AsyncGenerator<string> {
   const token = await getAccessToken();
