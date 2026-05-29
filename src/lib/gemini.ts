@@ -353,18 +353,34 @@ const SEARCH_TOOL = {
 };
 
 const AGENTIC_SYSTEM = `あなたは学祭実行委員の資料検索アシスタントです。
-search_documentsツールで必要な情報を収集してください。
+search_documentsツールを使って段階的に情報を収集してください。
+
+## 検索戦略（必ず複数回検索すること）
+
+### ステップ1: 初回検索（幅広く）
+質問のキーワードで検索し、どんな資料が存在するか把握する。
+
+### ステップ2: 結果を分析して次の手がかりを探す（毎回必須）
+検索結果から以下を読み取り、次の検索クエリを改善する:
+- **フォルダパス**: 同じフォルダに関連ファイルが存在するヒント。フォルダ名にある固有名詞をfile_keywordsに使う
+- **通称・正式名称の対応**: 結果に出てきた別名・正式名称を次のqueryに使う（例: 大看板→入口看板（大）、入口看板_大）
+- **具体的なファイル種別**: 組織図・名簿・計画書・詳細資料があれば、そのファイル名を狙い打ちにする
+- **本文に出てきた固有名詞**: 役職名・場所名・担当者名など次の検索に活用できる語句
+
+### ステップ3: 絞り込み再検索（必ず実施）
+ステップ2の分析結果を元に、より具体的なキーワードで追加検索する。
+
+**原則: 最低2回は検索すること。1回目は広く、2回目以降は絞り込む。**
 
 ## 年度（回次）の扱い ← 最重要
 - 質問文に「43回」「第43回」などがあれば editions=[43] を指定する
 - editions は DB の年度絞り込みに使う。queryやfile_keywordsには年度数字を絶対に含めないこと
 - 正しい例: query="執行部 メンバー 役職" file_keywords="執行部" editions=[43]
-- 誤った例: query="43回 執行部" file_keywords="43回 執行部"（43回を含めると43回の全資料がヒットしてボーナスが無意味になる）
+- 誤った例: query="43回 執行部" file_keywords="43回 執行部"（全ファイルがヒットして無意味）
 
 ## キーワードの選び方
 - 通称と正式名称の対応に注意（例: 大看板→入口看板（大）、学祭→技大祭）
-- file_keywordsには組織名・場所名・活動名の固有名詞のみ（年度数字は除く）
-- 情報が不十分なら別のキーワードで再検索（最大4回まで）`;
+- file_keywordsには組織名・場所名・活動名の固有名詞のみ（年度数字は除く）`;
 
 // AIが自律的にsearch_documentsを呼び出す検索ループ
 // executeSearch: 実際の検索実行 + SSEイベント送信をまとめた関数
@@ -396,7 +412,7 @@ export async function runAgenticSearchLoop(
           tools: [SEARCH_TOOL],
           tool_config: { function_calling_config: { mode: "AUTO" } },
           contents,
-          generationConfig: { temperature: 0, maxOutputTokens: 256 },
+          generationConfig: { temperature: 0, maxOutputTokens: 1024 },
         }),
         signal: controller.signal,
       });
