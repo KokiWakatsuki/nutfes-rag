@@ -37,6 +37,7 @@ export default function ChatClient({
   const [input, setInput] = useState("");
   const [selectedEditions, setSelectedEditions] = useState<number[] | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [searchingQueries, setSearchingQueries] = useState<string[]>([]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
@@ -168,14 +169,18 @@ export default function ChatClient({
             sources?: Source[];
             text?: string;
             message?: string;
+            query?: string;
           };
 
-          if (data.type === "meta") {
+          if (data.type === "searching") {
+            setSearchingQueries((prev) => [...prev, data.query ?? ""]);
+          } else if (data.type === "sources_update") {
             setMessages((prev) => {
               const msgs = [...prev];
               msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], sources: data.sources ?? [] };
               return msgs;
             });
+          } else if (data.type === "meta") {
             if (!capturedSessionId && data.sessionId) {
               setCurrentSessionId(data.sessionId);
               // API 再フェッチせず、新セッションをリストの先頭に追加
@@ -196,6 +201,7 @@ export default function ChatClient({
               );
             }
           } else if (data.type === "text") {
+            setSearchingQueries([]);
             setMessages((prev) => {
               const msgs = [...prev];
               msgs[msgs.length - 1] = {
@@ -235,6 +241,7 @@ export default function ChatClient({
       });
     } finally {
       setIsLoading(false);
+      setSearchingQueries([]);
     }
   }
 
@@ -454,10 +461,22 @@ export default function ChatClient({
                       }`}
                     >
                       {isStreamingPlaceholder ? (
-                        <div className="flex gap-1 items-center h-4">
-                          <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.3s]" />
-                          <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.15s]" />
-                          <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" />
+                        <div className="space-y-2">
+                          {searchingQueries.length > 0 && (
+                            <div className="space-y-1">
+                              {searchingQueries.map((q, qi) => (
+                                <div key={qi} className="flex items-center gap-1.5 text-xs text-gray-400">
+                                  <span className="text-indigo-400 flex-shrink-0">⌕</span>
+                                  <span className="truncate">{q}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          <div className="flex gap-1 items-center h-4">
+                            <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.3s]" />
+                            <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.15s]" />
+                            <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" />
+                          </div>
                         </div>
                       ) : msg.role === "assistant" ? (
                         <div className="prose prose-sm max-w-none prose-headings:font-semibold prose-headings:text-gray-800 prose-p:text-gray-800 prose-li:text-gray-800 prose-table:text-sm prose-code:text-pink-600 prose-code:bg-gray-100 prose-code:rounded prose-code:px-1 prose-pre:bg-gray-100 prose-pre:rounded-lg">

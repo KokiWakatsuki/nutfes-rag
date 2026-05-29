@@ -325,6 +325,92 @@ function extractObjects(buf: string): { objects: GeminiStreamChunk[]; remaining:
   return { objects, remaining: buf.slice(i) };
 }
 
+// AIが自律的に検索クエリを決定するためのツール定義
+const SEARCH_TOOL = {
+  function_declarations: [{
+    name: "search_documents",
+    description: "学祭の過去資料（MT議事録・企画書・計画書・提案書など）を検索します。必要に応じて複数回呼び出してください。",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        query: {
+          type: "STRING",
+          description: "検索クエリ（自然文またはキーワード列）。例: '執行部 メンバー 役職一覧' '大看板 入口看板 設置場所 構内'"
+        },
+        file_keywords: {
+          type: "STRING",
+          description: "ファイル名・フォルダ名に使われる固有名詞（省略可）。年度数字・一般疑問詞は除く。例: '執行部' '大看板 看板'"
+        }
+      },
+      required: ["query"]
+    }
+  }]
+};
+
+const AGENTIC_SYSTEM = `あなたは学祭実行委員の資料検索アシスタントです。
+search_documentsツールで必要な情報を収集してください。
+
+- 通称と正式名称の対応に注意（例: 大看板→入口看板（大）、学祭→技大祭）
+- 情報が不十分なら別のキーワードで再検索（最大4回まで）
+- file_keywordsには組織名・場所名・活動名の固有名詞のみ（年度数字は不要）`;
+
+// AIが自律的にsearch_documentsを呼び出す検索ループ
+// executeSearch: 実際の検索実行 + SSEイベント送信をまとめた関数
+export async function runAgenticSearchLoop(
+  question: string,
+  history: Array<{ role: "user" | "assistant"; content: string }>,
+  executeSearch: (query: string, fileKeywords?: string) => Promise<string>
+): Promise<void> {
+  const contents: object[] = [
+    ...history.slice(-6).map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }],
+    })),
+    { role: "user", parts: [{ text: question }] },
+  ];
+
+  for (let i = 0; i < 5; i++) {
+    const token = await getAccessToken();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    let res: Response;
+    try {
+      res = await fetch(vertexUrl(CHAT_MODEL, "generateContent"), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: AGENTIC_SYSTEM }] },
+          tools: [SEARCH_TOOL],
+          tool_config: { function_calling_config: { mode: "AUTO" } },
+          contents,
+          generationConfig: { temperature: 0, maxOutputTokens: 256 },
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!res.ok) throw new Error(`Gemini function calling error ${res.status}: ${await res.text()}`);
+
+    const data = await res.json() as {
+      candidates?: Array<{
+        content?: { parts?: Array<{ functionCall?: { name: string; args: Record<string, string> }; text?: string }> };
+        finishReason?: string;
+      }>;
+    };
+
+    const parts = data.candidates?.[0]?.content?.parts ?? [];
+    const fnCall = parts.find((p) => p.functionCall)?.functionCall;
+    if (!fnCall || fnCall.name !== "search_documents") break;
+
+    const result = await executeSearch(fnCall.args.query, fnCall.args.file_keywords);
+
+    contents.push({ role: "model", parts: [{ functionCall: { name: fnCall.name, args: fnCall.args } }] });
+    contents.push({ role: "user", parts: [{ functionResponse: { name: fnCall.name, response: { content: result } } }] });
+  }
+}
+
 export interface QueryExpansion {
   expanded: string;     // ベクトル検索用（同義語補完済み）
   fileKeywords: string; // ファイル名/フォルダ名検索用（AIが重要語のみ抽出）
