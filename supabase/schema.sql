@@ -58,20 +58,22 @@ DROP FUNCTION IF EXISTS match_documents(vector, INT, INTEGER[], TEXT);
 -- ハイブリッド検索関数
 -- query_text が指定された場合: ベクトル検索 + トライグラム検索を RRF で統合
 -- query_text が NULL の場合: ベクトル検索のみ
-CREATE FUNCTION match_documents(
+CREATE OR REPLACE FUNCTION match_documents(
   query_embedding vector(768),
   match_count     INT,
   filter_editions INTEGER[] DEFAULT NULL,
   query_text      TEXT DEFAULT NULL
 )
 RETURNS TABLE (
-  id         UUID,
-  file_id    TEXT,
-  file_name  TEXT,
-  content    TEXT,
-  edition    INT,
-  drive_id   TEXT,
-  similarity FLOAT
+  id                UUID,
+  file_id           TEXT,
+  file_name         TEXT,
+  content           TEXT,
+  edition           INT,
+  drive_id          TEXT,
+  drive_modified_at TEXT,
+  drive_created_at  TIMESTAMPTZ,
+  similarity        FLOAT
 )
 LANGUAGE plpgsql
 AS $$
@@ -81,6 +83,7 @@ BEGIN
     RETURN QUERY
     SELECT
       d.id, d.file_id, d.file_name, d.content, d.edition, d.drive_id,
+      d.drive_modified_at, d.drive_created_at,
       (1 - (d.embedding <=> query_embedding))::FLOAT AS similarity
     FROM documents d
     WHERE (filter_editions IS NULL OR d.edition = ANY(filter_editions))
@@ -113,7 +116,8 @@ BEGIN
       FROM vector_ranked v
       FULL OUTER JOIN text_ranked t ON v.id = t.id
     )
-    SELECT d.id, d.file_id, d.file_name, d.content, d.edition, d.drive_id, r.score AS similarity
+    SELECT d.id, d.file_id, d.file_name, d.content, d.edition, d.drive_id,
+           d.drive_modified_at, d.drive_created_at, r.score AS similarity
     FROM rrf r
     JOIN documents d ON d.id = r.doc_id
     ORDER BY r.score DESC

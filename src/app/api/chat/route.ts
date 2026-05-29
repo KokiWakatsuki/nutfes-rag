@@ -51,18 +51,36 @@ export async function POST(req: NextRequest) {
   const filterEditions: number[] | null =
     Array.isArray(editions) && editions.length > 0 ? editions : null;
 
-  // セッション管理・埋め込み生成・クエリ展開を並列実行
-  const [{ sessionId: currentSessionId, history }, embedding, expandedQuery] = await Promise.all([
-    setupSession(userEmail, sessionId ?? null, question, filterEditions),
-    generateEmbedding(question),
-    expandQueryTerms(question),
-  ]);
+  let currentSessionId: string;
+  let history: Array<{ role: "user" | "assistant"; content: string }>;
+  let embedding: number[];
+  let expandedQuery: string;
 
-  // ユーザーメッセージ保存と文書検索を並列実行
-  const [, docs] = await Promise.all([
-    saveChatMessage(currentSessionId, "user", question, []),
-    searchDocuments(embedding, filterEditions, 8, expandedQuery),
-  ]);
+  try {
+    // セッション管理・埋め込み生成・クエリ展開を並列実行
+    [{ sessionId: currentSessionId, history }, embedding, expandedQuery] = await Promise.all([
+      setupSession(userEmail, sessionId ?? null, question, filterEditions),
+      generateEmbedding(question),
+      expandQueryTerms(question),
+    ]);
+  } catch (err) {
+    console.error("Chat setup error:", err);
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: `初期化エラー: ${message}` }, { status: 500 });
+  }
+
+  let docs: Awaited<ReturnType<typeof searchDocuments>>;
+  try {
+    // ユーザーメッセージ保存と文書検索を並列実行
+    [, docs] = await Promise.all([
+      saveChatMessage(currentSessionId, "user", question, []),
+      searchDocuments(embedding, filterEditions, 8, expandedQuery),
+    ]);
+  } catch (err) {
+    console.error("Chat search error:", err);
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: `検索エラー: ${message}` }, { status: 500 });
+  }
 
   // ファイルIDでソース重複排除
   const seenFileIds = new Set<string>();

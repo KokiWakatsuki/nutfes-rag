@@ -138,9 +138,10 @@ export default function ChatClient({
       });
 
       if (!res.ok || !res.body) {
-        let errorMsg = "エラーが発生しました。";
-        if (res.status === 429) errorMsg = "リクエストが多すぎます。しばらく待ってから再度お試しください。";
-        else if (res.status === 503 || res.status === 500) {
+        let errorMsg = `エラーが発生しました。(HTTP ${res.status})`;
+        if (res.status === 429) {
+          errorMsg = "リクエストが多すぎます。しばらく待ってから再度お試しください。";
+        } else {
           try {
             const errData = await res.json() as { error?: string };
             if (errData.error) errorMsg = `エラー: ${errData.error}`;
@@ -166,6 +167,7 @@ export default function ChatClient({
             sessionId?: string;
             sources?: Source[];
             text?: string;
+            message?: string;
           };
 
           if (data.type === "meta") {
@@ -203,9 +205,10 @@ export default function ChatClient({
               return msgs;
             });
           } else if (data.type === "error") {
+            const errMsg = data.message ? `エラー: ${data.message}` : "エラーが発生しました。";
             setMessages((prev) => {
               const msgs = [...prev];
-              msgs[msgs.length - 1] = { role: "assistant", content: "エラーが発生しました。" };
+              msgs[msgs.length - 1] = { role: "assistant", content: errMsg };
               return msgs;
             });
           }
@@ -494,6 +497,8 @@ export default function ChatClient({
           <form onSubmit={handleSubmit} className="max-w-3xl mx-auto flex gap-2 items-end">
             <textarea
               ref={textareaRef}
+              id="chat-input"
+              name="chat-input"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
