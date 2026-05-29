@@ -70,9 +70,11 @@ export async function searchDocuments(
         .replace(/\s+/g, ' ')
         .trim();
     }
-    // 年度表現（43回など）はフォルダパス先頭に全件マッチするため除去
-    q = q.replace(/\d+回/g, ' ').replace(/\s+/g, ' ').trim();
   }
+
+  // 年度表現（43回, 43rd など）はフォルダパス先頭に全件マッチするため常に除去
+  // filter_editions が年度スコープを担うため、ILIKE検索に年度数字は不要
+  q = q.replace(/\d+(?:回|st|nd|rd|th)/gi, ' ').replace(/\s+/g, ' ').trim();
 
   if (q.length >= 2) params.query_text = q;
   const { data, error } = await getSupabase().rpc("match_documents", params);

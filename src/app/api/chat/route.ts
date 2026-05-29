@@ -90,13 +90,16 @@ export async function POST(req: NextRequest) {
         await runAgenticSearchLoop(
           question,
           history,
-          async (query: string, fileKeywords?: string) => {
+          async (query: string, fileKeywords?: string, aiEditions?: number[]) => {
             send({ type: "searching", query });
+
+            // UIで年度が選択されていればそれを優先、未選択ならAIが検出した回次を使用
+            const effectiveEditions = filterEditions ?? (aiEditions && aiEditions.length > 0 ? aiEditions : null);
 
             let docs: Document[] = [];
             try {
               const embedding = await generateEmbedding(query);
-              docs = await searchDocuments(embedding, filterEditions, 12, fileKeywords, query);
+              docs = await searchDocuments(embedding, effectiveEditions, 12, fileKeywords, query);
             } catch (err) {
               console.error("Search error in agentic loop:", err);
               return "検索中にエラーが発生しました。";

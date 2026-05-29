@@ -335,11 +335,16 @@ const SEARCH_TOOL = {
       properties: {
         query: {
           type: "STRING",
-          description: "検索クエリ（自然文またはキーワード列）。例: '執行部 メンバー 役職一覧' '大看板 入口看板 設置場所 構内'"
+          description: "検索クエリ（自然文またはキーワード列）。年度数字は含めない。例: '執行部 メンバー 役職一覧' '大看板 入口看板 設置場所'"
         },
         file_keywords: {
           type: "STRING",
-          description: "ファイル名・フォルダ名に使われる固有名詞（省略可）。年度数字・一般疑問詞は除く。例: '執行部' '大看板 看板'"
+          description: "ファイル名・フォルダ名に使われる固有名詞（省略可）。年度数字は含めない。例: '執行部' '大看板 看板'"
+        },
+        editions: {
+          type: "ARRAY",
+          items: { type: "INTEGER" },
+          description: "絞り込む回次の整数配列。質問文に「43回」「第43回」などが含まれていれば指定する。例: [43]。年度が不明・全年度対象なら省略。"
         }
       },
       required: ["query"]
@@ -350,16 +355,24 @@ const SEARCH_TOOL = {
 const AGENTIC_SYSTEM = `あなたは学祭実行委員の資料検索アシスタントです。
 search_documentsツールで必要な情報を収集してください。
 
+## 年度（回次）の扱い ← 最重要
+- 質問文に「43回」「第43回」などがあれば editions=[43] を指定する
+- editions は DB の年度絞り込みに使う。queryやfile_keywordsには年度数字を絶対に含めないこと
+- 正しい例: query="執行部 メンバー 役職" file_keywords="執行部" editions=[43]
+- 誤った例: query="43回 執行部" file_keywords="43回 執行部"（43回を含めると43回の全資料がヒットしてボーナスが無意味になる）
+
+## キーワードの選び方
 - 通称と正式名称の対応に注意（例: 大看板→入口看板（大）、学祭→技大祭）
-- 情報が不十分なら別のキーワードで再検索（最大4回まで）
-- file_keywordsには組織名・場所名・活動名の固有名詞のみ（年度数字は不要）`;
+- file_keywordsには組織名・場所名・活動名の固有名詞のみ（年度数字は除く）
+- 情報が不十分なら別のキーワードで再検索（最大4回まで）`;
 
 // AIが自律的にsearch_documentsを呼び出す検索ループ
 // executeSearch: 実際の検索実行 + SSEイベント送信をまとめた関数
+// aiEditions: AIが質問文から読み取った回次（UIで未選択の場合のフォールバック）
 export async function runAgenticSearchLoop(
   question: string,
   history: Array<{ role: "user" | "assistant"; content: string }>,
-  executeSearch: (query: string, fileKeywords?: string) => Promise<string>
+  executeSearch: (query: string, fileKeywords?: string, aiEditions?: number[]) => Promise<string>
 ): Promise<void> {
   const contents: object[] = [
     ...history.slice(-6).map((m) => ({
@@ -395,7 +408,7 @@ export async function runAgenticSearchLoop(
 
     const data = await res.json() as {
       candidates?: Array<{
-        content?: { parts?: Array<{ functionCall?: { name: string; args: Record<string, string> }; text?: string }> };
+        content?: { parts?: Array<{ functionCall?: { name: string; args: Record<string, unknown> }; text?: string }> };
         finishReason?: string;
       }>;
     };
@@ -404,7 +417,16 @@ export async function runAgenticSearchLoop(
     const fnCall = parts.find((p) => p.functionCall)?.functionCall;
     if (!fnCall || fnCall.name !== "search_documents") break;
 
-    const result = await executeSearch(fnCall.args.query, fnCall.args.file_keywords);
+    const rawEditions = fnCall.args.editions;
+    const aiEditions = Array.isArray(rawEditions) && rawEditions.length > 0
+      ? (rawEditions as unknown[]).map(Number).filter((n) => !isNaN(n))
+      : undefined;
+
+    const result = await executeSearch(
+      fnCall.args.query as string,
+      fnCall.args.file_keywords as string | undefined,
+      aiEditions
+    );
 
     contents.push({ role: "model", parts: [{ functionCall: { name: fnCall.name, args: fnCall.args } }] });
     contents.push({ role: "user", parts: [{ functionResponse: { name: fnCall.name, response: { content: result } } }] });
