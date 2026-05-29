@@ -24,17 +24,20 @@ CREATE TABLE IF NOT EXISTS documents (
   UNIQUE (file_id, chunk_index)
 );
 
--- ベクトル検索用インデックス（コサイン類似度）
-CREATE INDEX IF NOT EXISTS documents_embedding_idx
-  ON documents USING ivfflat (embedding vector_cosine_ops)
-  WITH (lists = 100);
+-- ベクトル検索用インデックス（HNSW、IVFFlat より精度・速度が優れる）
+CREATE INDEX IF NOT EXISTS documents_embedding_hnsw
+  ON documents USING hnsw(embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 128);
 
 -- 回次検索用インデックス
 CREATE INDEX IF NOT EXISTS documents_edition_idx ON documents (edition);
 
--- ハイブリッド検索用トライグラムインデックス
+-- ハイブリッド検索用トライグラムインデックス（コンテンツ・ファイル名）
 CREATE INDEX IF NOT EXISTS documents_content_trgm
   ON documents USING GIN (content gin_trgm_ops);
+
+CREATE INDEX IF NOT EXISTS documents_file_name_trgm
+  ON documents USING GIN(file_name gin_trgm_ops);
 
 -- updated_at を自動更新するトリガー関数
 CREATE OR REPLACE FUNCTION update_updated_at()
@@ -56,7 +59,10 @@ DROP FUNCTION IF EXISTS match_documents(vector, INT, INTEGER[]);
 DROP FUNCTION IF EXISTS match_documents(vector, INT, INTEGER[], TEXT);
 
 -- ハイブリッド検索関数
--- query_text が指定された場合: ベクトル検索 + トライグラム検索を RRF で統合
+-- query_text が指定された場合:
+--   1. ファイル名にキーワードが含まれるファイルを特定（ILIKE、スペース区切りで OR 検索）
+--   2. ベクトル検索（HNSW）で広めに候補を取得
+--   3. ファイル名マッチに +2.0 ボーナスを付与してスコア統合
 -- query_text が NULL の場合: ベクトル検索のみ
 CREATE OR REPLACE FUNCTION match_documents(
   query_embedding vector(768),
@@ -78,61 +84,62 @@ RETURNS TABLE (
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  -- word_similarity 閾値をセッションローカルで設定（%>> 演算子に反映される）
-  SET LOCAL pg_trgm.word_similarity_threshold = 0.15;
-
   IF query_text IS NULL OR length(trim(query_text)) < 2 THEN
     -- ベクトル検索のみ
     RETURN QUERY
-    SELECT
-      d.id, d.file_id, d.file_name, d.content, d.edition, d.drive_id,
-      d.drive_modified_at, d.drive_created_at,
-      (1 - (d.embedding <=> query_embedding))::FLOAT AS similarity
+    SELECT d.id, d.file_id, d.file_name, d.content, d.edition, d.drive_id,
+           d.drive_modified_at, d.drive_created_at,
+           (1 - (d.embedding <=> query_embedding))::FLOAT AS similarity
     FROM documents d
     WHERE (filter_editions IS NULL OR d.edition = ANY(filter_editions))
       AND d.embedding IS NOT NULL
     ORDER BY d.embedding <=> query_embedding
     LIMIT match_count;
   ELSE
-    -- ハイブリッド検索: ベクトル + ファイル名/コンテンツ先頭のテキスト一致（RRF）
-    -- ファイル名と先頭300文字のみ検索することでタイムアウトを防ぐ
     RETURN QUERY
-    WITH vector_ranked AS (
-      SELECT d.id,
-             ROW_NUMBER() OVER (ORDER BY d.embedding <=> query_embedding) AS rank
+    WITH
+    fname_files AS (
+      SELECT DISTINCT d.file_id
+      FROM documents d,
+           unnest(string_to_array(trim(query_text), ' ')) AS term
+      WHERE (filter_editions IS NULL OR d.edition = ANY(filter_editions))
+        AND length(trim(term)) >= 2
+        AND d.file_name ILIKE '%' || trim(term) || '%'
+    ),
+    vector_ranked AS (
+      SELECT d.id, d.file_id,
+             (1 - (d.embedding <=> query_embedding))::FLOAT AS vec_sim
       FROM documents d
       WHERE (filter_editions IS NULL OR d.edition = ANY(filter_editions))
         AND d.embedding IS NOT NULL
-      LIMIT match_count * 5
+      ORDER BY d.embedding <=> query_embedding
+      LIMIT match_count * 8
     ),
-    text_ranked AS (
-      SELECT d.id,
-             ROW_NUMBER() OVER (ORDER BY
-               GREATEST(
-                 similarity(query_text, d.file_name),
-                 similarity(query_text, left(d.content, 300))
-               ) DESC
-             ) AS rank
+    fname_extra AS (
+      SELECT d.id, d.file_id,
+             (1 - (d.embedding <=> query_embedding))::FLOAT AS vec_sim
       FROM documents d
-      WHERE (filter_editions IS NULL OR d.edition = ANY(filter_editions))
-        AND (
-          similarity(query_text, d.file_name) > 0.08
-          OR similarity(query_text, left(d.content, 300)) > 0.08
-        )
-      LIMIT match_count * 5
+      JOIN fname_files ff ON d.file_id = ff.file_id
+      WHERE d.embedding IS NOT NULL
+        AND (filter_editions IS NULL OR d.edition = ANY(filter_editions))
+        AND d.id NOT IN (SELECT id FROM vector_ranked)
+      ORDER BY d.embedding <=> query_embedding
+      LIMIT match_count * 2
     ),
-    rrf AS (
-      SELECT
-        COALESCE(v.id, t.id) AS doc_id,
-        (COALESCE(1.0 / (60.0 + v.rank), 0.0) + COALESCE(1.0 / (60.0 + t.rank), 0.0))::FLOAT AS score
+    merged AS (
+      SELECT v.id,
+             CASE WHEN ff.file_id IS NOT NULL THEN 2.0 ELSE 0.0 END + v.vec_sim AS score
       FROM vector_ranked v
-      FULL OUTER JOIN text_ranked t ON v.id = t.id
+      LEFT JOIN fname_files ff ON v.file_id = ff.file_id
+      UNION ALL
+      SELECT fe.id, 2.0 + fe.vec_sim AS score
+      FROM fname_extra fe
     )
     SELECT d.id, d.file_id, d.file_name, d.content, d.edition, d.drive_id,
-           d.drive_modified_at, d.drive_created_at, r.score AS similarity
-    FROM rrf r
-    JOIN documents d ON d.id = r.doc_id
-    ORDER BY r.score DESC
+           d.drive_modified_at, d.drive_created_at, m.score AS similarity
+    FROM merged m
+    JOIN documents d ON d.id = m.id
+    ORDER BY m.score DESC
     LIMIT match_count;
   END IF;
 END;
