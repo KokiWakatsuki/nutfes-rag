@@ -106,7 +106,7 @@ BEGIN
              ROW_NUMBER() OVER (ORDER BY word_similarity(query_text, d.content) DESC) AS rank
       FROM documents d
       WHERE (filter_editions IS NULL OR d.edition = ANY(filter_editions))
-        AND word_similarity(query_text, d.content) > 0.05
+        AND word_similarity(query_text, d.content) > 0.15
       LIMIT match_count * 5
     ),
     rrf AS (
