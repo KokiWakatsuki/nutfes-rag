@@ -56,10 +56,10 @@ export async function searchDocuments(
     query_embedding: queryEmbedding,
     match_count: limit,
     filter_editions: editions,
-    // query_text は意図的に渡さない: 日本語テキストでは pg_trgm のハイブリッド検索が
-    // statement timeout を引き起こす。ベクトル検索のみで十分な精度が得られる。
   };
-  void queryText; // 将来の再有効化のためシグネチャは保持
+  if (queryText && queryText.trim().length >= 2) {
+    params.query_text = queryText.trim();
+  }
   const { data, error } = await getSupabase().rpc("match_documents", params);
   if (error) throw error;
   return data ?? [];

@@ -94,8 +94,8 @@ BEGIN
     ORDER BY d.embedding <=> query_embedding
     LIMIT match_count;
   ELSE
-    -- ハイブリッド検索: ベクトル + トライグラム（Reciprocal Rank Fusion）
-    -- query_text %>> d.content は GIN インデックスを使用するため高速
+    -- ハイブリッド検索: ベクトル + ファイル名/コンテンツ先頭のテキスト一致（RRF）
+    -- ファイル名と先頭300文字のみ検索することでタイムアウトを防ぐ
     RETURN QUERY
     WITH vector_ranked AS (
       SELECT d.id,
@@ -107,10 +107,18 @@ BEGIN
     ),
     text_ranked AS (
       SELECT d.id,
-             ROW_NUMBER() OVER (ORDER BY word_similarity(query_text, d.content) DESC) AS rank
+             ROW_NUMBER() OVER (ORDER BY
+               GREATEST(
+                 similarity(query_text, d.file_name),
+                 similarity(query_text, left(d.content, 300))
+               ) DESC
+             ) AS rank
       FROM documents d
       WHERE (filter_editions IS NULL OR d.edition = ANY(filter_editions))
-        AND query_text %>> d.content
+        AND (
+          similarity(query_text, d.file_name) > 0.08
+          OR similarity(query_text, left(d.content, 300)) > 0.08
+        )
       LIMIT match_count * 5
     ),
     rrf AS (
