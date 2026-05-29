@@ -46,6 +46,30 @@ export interface ChatMessage {
 
 // --- Documents ---
 
+export async function listFilesByPath(
+  pathPattern: string,
+  edition?: number
+): Promise<Array<{ file_id: string; file_name: string; edition: number; folder_path: string }>> {
+  const { data, error } = await getSupabase().rpc("list_files_by_path", {
+    path_pattern: pathPattern,
+    filter_edition: edition ?? null,
+  });
+  if (error) throw error;
+  return data ?? [];
+}
+
+export async function getFileChunks(
+  namePattern: string,
+  edition?: number
+): Promise<Array<{ id: string; file_id: string; file_name: string; edition: number; content: string; chunk_index: number }>> {
+  const { data, error } = await getSupabase().rpc("get_file_chunks", {
+    name_pattern: namePattern,
+    filter_edition: edition ?? null,
+  });
+  if (error) throw error;
+  return data ?? [];
+}
+
 export async function searchDocuments(
   queryEmbedding: number[],
   editions: number[] | null,

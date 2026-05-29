@@ -325,70 +325,101 @@ function extractObjects(buf: string): { objects: GeminiStreamChunk[]; remaining:
   return { objects, remaining: buf.slice(i) };
 }
 
-// AIが自律的に検索クエリを決定するためのツール定義
-const SEARCH_TOOL = {
-  function_declarations: [{
-    name: "search_documents",
-    description: "学祭の過去資料（MT議事録・企画書・計画書・提案書など）を検索します。必要に応じて複数回呼び出してください。",
-    parameters: {
-      type: "OBJECT",
-      properties: {
-        query: {
-          type: "STRING",
-          description: "検索クエリ（自然文またはキーワード列）。年度数字は含めない。例: '執行部 メンバー 役職一覧' '大看板 入口看板 設置場所'"
+// AIエージェントが使える3つのツール定義
+const TOOLS = {
+  function_declarations: [
+    {
+      name: "search_documents",
+      description: "学祭の過去資料（MT議事録・企画書・計画書・提案書など）を意味的に検索します。内容が似た資料を幅広く探す入口として使います。",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          query: {
+            type: "STRING",
+            description: "検索クエリ（自然文またはキーワード列）。年度数字は含めない。例: '執行部 メンバー 役職一覧'"
+          },
+          file_keywords: {
+            type: "STRING",
+            description: "ファイル名・フォルダ名に使われる固有名詞（省略可）。年度数字は含めない。例: '執行部' '大看板'"
+          },
+          editions: {
+            type: "ARRAY",
+            items: { type: "INTEGER" },
+            description: "絞り込む回次の整数配列。質問文に「42回」「第43回」などが含まれていれば指定する。例: [42]。年度不明・全年度なら省略。"
+          }
         },
-        file_keywords: {
-          type: "STRING",
-          description: "ファイル名・フォルダ名に使われる固有名詞（省略可）。年度数字は含めない。例: '執行部' '大看板 看板'"
+        required: ["query"]
+      }
+    },
+    {
+      name: "list_files",
+      description: "フォルダ名・ファイル名のパターンでどんな資料が存在するかを一覧表示します。search_documentsでヒットしなかった場合もフォルダを直接ブラウジングできます。",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          path_pattern: {
+            type: "STRING",
+            description: "フォルダ名・ファイル名に含まれるキーワード（部分一致）。例: '執行部' '看板装飾' '名簿'"
+          },
+          edition: {
+            type: "INTEGER",
+            description: "絞り込む回次。例: 42"
+          }
         },
-        editions: {
-          type: "ARRAY",
-          items: { type: "INTEGER" },
-          description: "絞り込む回次の整数配列。質問文に「43回」「第43回」などが含まれていれば指定する。例: [43]。年度が不明・全年度対象なら省略。"
-        }
-      },
-      required: ["query"]
+        required: ["path_pattern"]
+      }
+    },
+    {
+      name: "get_file_content",
+      description: "ファイル名を指定してそのファイルの全文を取得します。search_documentsやlist_filesで存在を確認したファイルの詳細を読むために使います。",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          file_name: {
+            type: "STRING",
+            description: "読み取るファイル名（部分一致可）。list_filesやsearch_documentsの結果に出てきたファイル名を使う。例: '組織図' '執行部MT議事録'"
+          },
+          edition: {
+            type: "INTEGER",
+            description: "絞り込む回次。例: 42"
+          }
+        },
+        required: ["file_name"]
+      }
     }
-  }]
+  ]
 };
 
 const AGENTIC_SYSTEM = `あなたは学祭実行委員の資料検索アシスタントです。
-search_documentsツールを使って段階的に情報を収集してください。
+3つのツールを組み合わせて段階的に情報を収集してください。
 
-## 検索戦略（必ず複数回検索すること）
+## ツールの使い分け
+- **search_documents**: 意味的に似た資料を幅広く探す（最初の入口）
+- **list_files**: フォルダ名パターンで存在するファイルを把握する（ブラウジング）
+- **get_file_content**: 特定ファイルの全文を読む（詳細取得）
 
-### ステップ1: 初回検索（幅広く）
-質問のキーワードで検索し、どんな資料が存在するか把握する。
-
-### ステップ2: 結果を分析して次の手がかりを探す（毎回必須）
-検索結果から以下を読み取り、次の検索クエリを改善する:
-- **フォルダパス**: 同じフォルダに関連ファイルが存在するヒント。フォルダ名にある固有名詞をfile_keywordsに使う
-- **通称・正式名称の対応**: 結果に出てきた別名・正式名称を次のqueryに使う（例: 大看板→入口看板（大）、入口看板_大）
-- **具体的なファイル種別**: 組織図・名簿・計画書・詳細資料があれば、そのファイル名を狙い打ちにする
-- **本文に出てきた固有名詞**: 役職名・場所名・担当者名など次の検索に活用できる語句
-
-### ステップ3: 絞り込み再検索（必ず実施）
-ステップ2の分析結果を元に、より具体的なキーワードで追加検索する。
-
-**原則: 最低2回は検索すること。1回目は広く、2回目以降は絞り込む。**
+## 検索戦略（最低2回のツール呼び出しを必須とする）
+1. search_documents で幅広く探す
+2. 結果のフォルダパスに注目 → list_files でそのフォルダを調べる
+3. 目的のファイルが特定できたら get_file_content で全文取得
+4. 別キーワードが必要なら search_documents を再実行
 
 ## 年度（回次）の扱い ← 最重要
-- 質問文に「43回」「第43回」などがあれば editions=[43] を指定する
-- editions は DB の年度絞り込みに使う。queryやfile_keywordsには年度数字を絶対に含めないこと
-- 正しい例: query="執行部 メンバー 役職" file_keywords="執行部" editions=[43]
-- 誤った例: query="43回 執行部" file_keywords="43回 執行部"（全ファイルがヒットして無意味）
+- 質問文に「42回」「第43回」などがあれば editions/edition に指定する
+- queryやfile_keywordsには年度数字を絶対に含めないこと
+- 正しい例: search_documents(query="執行部 メンバー", editions=[42])
+- 誤った例: search_documents(query="42回 執行部")（年度の全ファイルがヒットして無意味）
 
 ## キーワードの選び方
 - 通称と正式名称の対応に注意（例: 大看板→入口看板（大）、学祭→技大祭）
 - file_keywordsには組織名・場所名・活動名の固有名詞のみ（年度数字は除く）`;
 
-// AIが自律的にsearch_documentsを呼び出す検索ループ
-// executeSearch: 実際の検索実行 + SSEイベント送信をまとめた関数
-// aiEditions: AIが質問文から読み取った回次（UIで未選択の場合のフォールバック）
+// AIが3つのツールを自律的に呼び出す検索ループ
+// executeTool: ツール名と引数を受け取り結果文字列を返す汎用ハンドラ
 export async function runAgenticSearchLoop(
   question: string,
   history: Array<{ role: "user" | "assistant"; content: string }>,
-  executeSearch: (query: string, fileKeywords?: string, aiEditions?: number[]) => Promise<string>
+  executeTool: (name: string, args: Record<string, unknown>) => Promise<string>
 ): Promise<void> {
   const contents: object[] = [
     ...history.slice(-6).map((m) => ({
@@ -397,6 +428,8 @@ export async function runAgenticSearchLoop(
     })),
     { role: "user", parts: [{ text: question }] },
   ];
+
+  const knownTools = new Set(["search_documents", "list_files", "get_file_content"]);
 
   for (let i = 0; i < 5; i++) {
     const token = await getAccessToken();
@@ -409,7 +442,7 @@ export async function runAgenticSearchLoop(
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           system_instruction: { parts: [{ text: AGENTIC_SYSTEM }] },
-          tools: [SEARCH_TOOL],
+          tools: [TOOLS],
           tool_config: { function_calling_config: { mode: "AUTO" } },
           contents,
           generationConfig: { temperature: 0, maxOutputTokens: 1024 },
@@ -431,18 +464,9 @@ export async function runAgenticSearchLoop(
 
     const parts = data.candidates?.[0]?.content?.parts ?? [];
     const fnCall = parts.find((p) => p.functionCall)?.functionCall;
-    if (!fnCall || fnCall.name !== "search_documents") break;
+    if (!fnCall || !knownTools.has(fnCall.name)) break;
 
-    const rawEditions = fnCall.args.editions;
-    const aiEditions = Array.isArray(rawEditions) && rawEditions.length > 0
-      ? (rawEditions as unknown[]).map(Number).filter((n) => !isNaN(n))
-      : undefined;
-
-    const result = await executeSearch(
-      fnCall.args.query as string,
-      fnCall.args.file_keywords as string | undefined,
-      aiEditions
-    );
+    const result = await executeTool(fnCall.name, fnCall.args);
 
     contents.push({ role: "model", parts: [{ functionCall: { name: fnCall.name, args: fnCall.args } }] });
     contents.push({ role: "user", parts: [{ functionResponse: { name: fnCall.name, response: { content: result } } }] });

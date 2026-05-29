@@ -3,6 +3,8 @@ import { auth } from "@/auth";
 import { generateEmbedding, streamGenerateAnswer, runAgenticSearchLoop } from "@/lib/gemini";
 import {
   searchDocuments,
+  listFilesByPath,
+  getFileChunks,
   createChatSession,
   getChatSession,
   touchChatSession,
@@ -30,6 +32,13 @@ async function setupSession(
   ]);
   const history = sessionData?.messages.map((m) => ({ role: m.role, content: m.content })) ?? [];
   return { sessionId, history };
+}
+
+function formatDocForAI(d: Document, index: number): string {
+  const folderMatch = d.content.match(/^【フォルダ: ([^\]]+)】/);
+  const folderLine = folderMatch ? `フォルダ: ${folderMatch[1]}` : "";
+  const body = folderMatch ? d.content.slice(folderMatch[0].length).trimStart() : d.content;
+  return `[${index + 1}] ${d.file_name}（第${d.edition}回）${folderLine ? " | " + folderLine : ""}\n${body.slice(0, 600)}`;
 }
 
 export async function POST(req: NextRequest) {
@@ -73,7 +82,6 @@ export async function POST(req: NextRequest) {
 
       send({ type: "meta", sessionId: sid, sources: [] });
 
-      // ユーザーメッセージを先に保存
       try {
         await saveChatMessage(sid, "user", question, []);
       } catch (err) {
@@ -85,45 +93,119 @@ export async function POST(req: NextRequest) {
       const allSources: Array<{ fileName: string; edition: number }> = [];
       const seenFileIds = new Set<string>();
 
-      // Agentic 検索フェーズ: AIが自律的にクエリを決定・実行
+      function addDocs(docs: Document[]) {
+        for (const doc of docs) {
+          if (!seenIds.has(doc.id)) { seenIds.add(doc.id); collectedDocs.push(doc); }
+          if (!seenFileIds.has(doc.file_id)) { seenFileIds.add(doc.file_id); allSources.push({ fileName: doc.file_name, edition: doc.edition }); }
+        }
+      }
+
+      // UIで年度が選択されていればそれを優先、未選択ならAI検出値を使用
+      function resolveEditions(aiSingle?: number, aiArray?: number[]): number[] | null {
+        if (filterEditions) return filterEditions;
+        if (aiArray && aiArray.length > 0) return aiArray;
+        if (aiSingle != null) return [aiSingle];
+        return null;
+      }
+
+      // Agentic 検索フェーズ: 3ツールを自律的に呼び出す
       try {
         await runAgenticSearchLoop(
           question,
           history,
-          async (query: string, fileKeywords?: string, aiEditions?: number[]) => {
-            send({ type: "searching", query });
+          async (name: string, args: Record<string, unknown>) => {
 
-            // UIで年度が選択されていればそれを優先、未選択ならAIが検出した回次を使用
-            const effectiveEditions = filterEditions ?? (aiEditions && aiEditions.length > 0 ? aiEditions : null);
+            // ── search_documents ──────────────────────────────────────
+            if (name === "search_documents") {
+              const query = args.query as string;
+              const fileKeywords = args.file_keywords as string | undefined;
+              const rawEditions = args.editions;
+              const aiEditions = Array.isArray(rawEditions)
+                ? (rawEditions as unknown[]).map(Number).filter((n) => !isNaN(n))
+                : undefined;
 
-            let docs: Document[] = [];
-            try {
-              const embedding = await generateEmbedding(query);
-              docs = await searchDocuments(embedding, effectiveEditions, 12, fileKeywords, query);
-            } catch (err) {
-              console.error("Search error in agentic loop:", err);
-              return "検索中にエラーが発生しました。";
+              send({ type: "searching", query });
+
+              let docs: Document[] = [];
+              try {
+                const embedding = await generateEmbedding(query);
+                docs = await searchDocuments(embedding, resolveEditions(undefined, aiEditions), 12, fileKeywords, query);
+              } catch (err) {
+                console.error("search_documents error:", err);
+                return "検索中にエラーが発生しました。";
+              }
+
+              addDocs(docs);
+              if (docs.length === 0) return "該当する資料が見つかりませんでした。";
+              return docs.map(formatDocForAI).join("\n\n---\n\n");
             }
 
-            for (const doc of docs) {
-              if (!seenIds.has(doc.id)) {
-                seenIds.add(doc.id);
-                collectedDocs.push(doc);
-              }
-              if (!seenFileIds.has(doc.file_id)) {
-                seenFileIds.add(doc.file_id);
-                allSources.push({ fileName: doc.file_name, edition: doc.edition });
+            // ── list_files ────────────────────────────────────────────
+            if (name === "list_files") {
+              const pathPattern = args.path_pattern as string;
+              const aiEdition = args.edition != null ? Number(args.edition) : undefined;
+              const effectiveEdition = resolveEditions(aiEdition)?.[0];
+
+              send({ type: "searching", query: `フォルダ「${pathPattern}」を確認中` });
+
+              try {
+                const files = await listFilesByPath(pathPattern, effectiveEdition);
+                if (files.length === 0) return `「${pathPattern}」に一致するファイルは見つかりませんでした。`;
+                return `【ファイル一覧: ${pathPattern}】\n` +
+                  files.map((f) => `- ${f.file_name}（第${f.edition}回）${f.folder_path ? " | " + f.folder_path : ""}`).join("\n");
+              } catch (err) {
+                console.error("list_files error:", err);
+                return "ファイル一覧の取得中にエラーが発生しました。";
               }
             }
 
-            if (docs.length === 0) return "該当する資料が見つかりませんでした。";
+            // ── get_file_content ──────────────────────────────────────
+            if (name === "get_file_content") {
+              const fileName = args.file_name as string;
+              const aiEdition = args.edition != null ? Number(args.edition) : undefined;
+              const effectiveEdition = resolveEditions(aiEdition)?.[0];
 
-            return docs.map((d, i) => {
-              const folderMatch = d.content.match(/^【フォルダ: ([^\]]+)】/);
-              const folderLine = folderMatch ? `フォルダ: ${folderMatch[1]}` : "";
-              const body = folderMatch ? d.content.slice(folderMatch[0].length).trimStart() : d.content;
-              return `[${i + 1}] ${d.file_name}（第${d.edition}回）${folderLine ? " | " + folderLine : ""}\n${body.slice(0, 600)}`;
-            }).join("\n\n---\n\n");
+              send({ type: "searching", query: `「${fileName}」を読み込み中` });
+
+              try {
+                const chunks = await getFileChunks(fileName, effectiveEdition);
+                if (chunks.length === 0) return `「${fileName}」というファイルは見つかりませんでした。`;
+
+                // collectedDocs に追加（回答生成に使用）
+                for (const chunk of chunks) {
+                  if (!seenIds.has(chunk.id)) {
+                    seenIds.add(chunk.id);
+                    collectedDocs.push({
+                      id: chunk.id,
+                      file_id: chunk.file_id,
+                      file_name: chunk.file_name,
+                      content: chunk.content,
+                      edition: chunk.edition,
+                      drive_id: "",
+                      created_at: "",
+                      updated_at: "",
+                    } as Document);
+                  }
+                  if (!seenFileIds.has(chunk.file_id)) {
+                    seenFileIds.add(chunk.file_id);
+                    allSources.push({ fileName: chunk.file_name, edition: chunk.edition });
+                  }
+                }
+
+                // AIへ全文を返す（フォルダプレフィックスは除く）
+                const fullText = chunks.map((c) => {
+                  const folderMatch = c.content.match(/^【フォルダ: ([^\]]+)】/);
+                  return folderMatch ? c.content.slice(folderMatch[0].length).trimStart() : c.content;
+                }).join("\n");
+
+                return `【${chunks[0].file_name}（第${chunks[0].edition}回）全文】\n${fullText.slice(0, 8000)}`;
+              } catch (err) {
+                console.error("get_file_content error:", err);
+                return "ファイル内容の取得中にエラーが発生しました。";
+              }
+            }
+
+            return "不明なツールです。";
           }
         );
       } catch (err) {
@@ -133,25 +215,14 @@ export async function POST(req: NextRequest) {
           send({ type: "searching", query: question });
           const embedding = await generateEmbedding(question);
           const docs = await searchDocuments(embedding, filterEditions, 12, undefined, question);
-          for (const doc of docs) {
-            if (!seenIds.has(doc.id)) {
-              seenIds.add(doc.id);
-              collectedDocs.push(doc);
-            }
-            if (!seenFileIds.has(doc.file_id)) {
-              seenFileIds.add(doc.file_id);
-              allSources.push({ fileName: doc.file_name, edition: doc.edition });
-            }
-          }
+          addDocs(docs);
         } catch (fallbackErr) {
           console.error("Fallback search error:", fallbackErr);
         }
       }
 
-      // 検索完了 → ソース確定
       send({ type: "sources_update", sources: allSources });
 
-      // 最大20件に絞って回答生成
       const finalDocs = collectedDocs.slice(0, 20);
       let fullText = "";
 
