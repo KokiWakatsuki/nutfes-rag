@@ -325,8 +325,14 @@ function extractObjects(buf: string): { objects: GeminiStreamChunk[]; remaining:
   return { objects, remaining: buf.slice(i) };
 }
 
-// クエリ展開: 同義語・別称を補完した検索テキストを生成（タイムアウト時は原文を返す）
-export async function expandQueryTerms(question: string): Promise<string> {
+export interface QueryExpansion {
+  expanded: string;     // ベクトル検索用（同義語補完済み）
+  fileKeywords: string; // ファイル名/フォルダ名検索用（AIが重要語のみ抽出）
+}
+
+// クエリ展開: 同義語補完 + ファイル検索キーワード抽出を1回のAPI呼び出しで実施
+// タイムアウト時は fallback として元の質問を返す
+export async function expandQueryTerms(question: string): Promise<QueryExpansion> {
   try {
     const token = await getAccessToken();
     const controller = new AbortController();
@@ -337,19 +343,27 @@ export async function expandQueryTerms(question: string): Promise<string> {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: `学祭・イベント運営の文書検索用です。以下の質問に含まれる用語の同義語・別称・略称をスペース区切りで追記した検索クエリを1行だけ出力してください（元の質問も含める・説明不要）。\n\n質問: ${question}` }] }],
-          generationConfig: { maxOutputTokens: 80, temperature: 0 },
+          contents: [{
+            role: "user",
+            parts: [{ text: `学祭・イベント運営の文書検索システムです。以下の質問に対して2行だけ出力してください（説明不要）。\n\n1行目: ベクトル検索用クエリ（元の語句＋同義語・別称・略称をスペース区切り）\n2行目: ファイル名/フォルダ名検索用キーワード（資料・組織・場所・活動の固有名詞のみ、スペース区切り。年度数字〈43回など〉・一般疑問詞〈誰/何/どこ〉は除く）\n\n質問: ${question}` }],
+          }],
+          generationConfig: { maxOutputTokens: 100, temperature: 0 },
         }),
         signal: controller.signal,
       });
     } finally {
       clearTimeout(timer);
     }
-    if (!res.ok) return question;
+    if (!res.ok) return { expanded: question, fileKeywords: '' };
     const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-    return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || question;
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? '';
+    const lines = text.split('\n').map((l: string) => l.trim()).filter((l: string) => l.length > 0);
+    return {
+      expanded: lines[0] || question,
+      fileKeywords: lines[1] || '',
+    };
   } catch {
-    return question;
+    return { expanded: question, fileKeywords: '' };
   }
 }
 

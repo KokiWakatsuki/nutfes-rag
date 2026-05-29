@@ -54,11 +54,11 @@ export async function POST(req: NextRequest) {
   let currentSessionId: string;
   let history: Array<{ role: "user" | "assistant"; content: string }>;
   let embedding: number[];
-  let expandedQuery: string;
+  let expansion: Awaited<ReturnType<typeof expandQueryTerms>>;
 
   try {
     // セッション管理・埋め込み生成・クエリ展開を並列実行
-    [{ sessionId: currentSessionId, history }, embedding, expandedQuery] = await Promise.all([
+    [{ sessionId: currentSessionId, history }, embedding, expansion] = await Promise.all([
       setupSession(userEmail, sessionId ?? null, question, filterEditions),
       generateEmbedding(question),
       expandQueryTerms(question),
@@ -74,7 +74,8 @@ export async function POST(req: NextRequest) {
     // ユーザーメッセージ保存と文書検索を並列実行
     [, docs] = await Promise.all([
       saveChatMessage(currentSessionId, "user", question, []),
-      searchDocuments(embedding, filterEditions, 15, expandedQuery),
+      // fileKeywords: AIが重要語と判定したキーワード（空の場合は question でフォールバック）
+      searchDocuments(embedding, filterEditions, 15, expansion.fileKeywords, question),
     ]);
   } catch (err) {
     console.error("Chat search error:", err);

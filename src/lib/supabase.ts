@@ -50,29 +50,31 @@ export async function searchDocuments(
   queryEmbedding: number[],
   editions: number[] | null,
   limit = 8,
-  queryText?: string
+  fileKeywords?: string,  // AIが抽出したファイル名/フォルダ検索用キーワード
+  fallbackQuery?: string  // AI失敗時のフォールバック（元の質問）
 ): Promise<Document[]> {
   const params: Record<string, unknown> = {
     query_embedding: queryEmbedding,
     match_count: limit,
     filter_editions: editions,
   };
-  if (queryText && queryText.trim().length >= 2) {
-    // 全角スペースなどを正規化
-    let q = queryText.trim().replace(/[\s　 ]+/g, ' ');
-    // スペースがない（= expandQueryTerms が元の質問を返した）場合、
-    // 日本語の助詞・句読点で区切ってキーワードを抽出する
+
+  let q = (fileKeywords ?? '').trim().replace(/[\s　 ]+/g, ' ');
+
+  if (q.length < 2 && fallbackQuery) {
+    // AIが失敗した場合: 元の質問を助詞・句読点で分割してキーワードを抽出
+    q = fallbackQuery.trim().replace(/[\s　 ]+/g, ' ');
     if (!q.includes(' ') && q.length > 4) {
       q = q
         .replace(/[のはがをにでもとかなやねよてへからまでよりなどって。、！？…「」【】（）：；・～]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
     }
-    // "43回" のような年度表現はフォルダパス先頭（第43回技大祭）に全件マッチして
-    // ボーナス検索を無効化するため除去（edition filter で既に絞り込み済み）
+    // 年度表現（43回など）はフォルダパス先頭に全件マッチするため除去
     q = q.replace(/\d+回/g, ' ').replace(/\s+/g, ' ').trim();
-    if (q.length >= 2) params.query_text = q;
   }
+
+  if (q.length >= 2) params.query_text = q;
   const { data, error } = await getSupabase().rpc("match_documents", params);
   if (error) throw error;
   return data ?? [];
