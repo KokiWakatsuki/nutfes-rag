@@ -78,6 +78,9 @@ RETURNS TABLE (
 LANGUAGE plpgsql
 AS $$
 BEGIN
+  -- word_similarity 閾値をセッションローカルで設定（%>> 演算子に反映される）
+  SET LOCAL pg_trgm.word_similarity_threshold = 0.15;
+
   IF query_text IS NULL OR length(trim(query_text)) < 2 THEN
     -- ベクトル検索のみ
     RETURN QUERY
@@ -92,6 +95,7 @@ BEGIN
     LIMIT match_count;
   ELSE
     -- ハイブリッド検索: ベクトル + トライグラム（Reciprocal Rank Fusion）
+    -- query_text %>> d.content は GIN インデックスを使用するため高速
     RETURN QUERY
     WITH vector_ranked AS (
       SELECT d.id,
@@ -106,7 +110,7 @@ BEGIN
              ROW_NUMBER() OVER (ORDER BY word_similarity(query_text, d.content) DESC) AS rank
       FROM documents d
       WHERE (filter_editions IS NULL OR d.edition = ANY(filter_editions))
-        AND word_similarity(query_text, d.content) > 0.15
+        AND query_text %>> d.content
       LIMIT match_count * 5
     ),
     rrf AS (

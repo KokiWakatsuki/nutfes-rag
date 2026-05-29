@@ -58,7 +58,8 @@ export async function searchDocuments(
     filter_editions: editions,
   };
   if (queryText && queryText.trim().length >= 2) {
-    params.query_text = queryText.trim();
+    // word_similarity は短いクエリで最も効果的。長すぎると GIN インデックスが効かなくなる
+    params.query_text = queryText.trim().slice(0, 40);
   }
   const { data, error } = await getSupabase().rpc("match_documents", params);
   if (error) throw error;
