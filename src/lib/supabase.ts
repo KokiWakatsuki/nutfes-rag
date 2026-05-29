@@ -68,6 +68,9 @@ export async function searchDocuments(
         .replace(/\s+/g, ' ')
         .trim();
     }
+    // "43回" のような年度表現はフォルダパス先頭（第43回技大祭）に全件マッチして
+    // ボーナス検索を無効化するため除去（edition filter で既に絞り込み済み）
+    q = q.replace(/\d+回/g, ' ').replace(/\s+/g, ' ').trim();
     if (q.length >= 2) params.query_text = q;
   }
   const { data, error } = await getSupabase().rpc("match_documents", params);
