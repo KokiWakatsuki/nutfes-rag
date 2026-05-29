@@ -104,10 +104,13 @@ BEGIN
            unnest(string_to_array(trim(query_text), ' ')) AS term
       WHERE (filter_editions IS NULL OR d.edition = ANY(filter_editions))
         AND length(trim(term)) >= 2
-        AND d.file_name ILIKE '%' || trim(term) || '%'
+        AND (
+          d.file_name ILIKE '%' || trim(term) || '%'
+          OR left(d.content, 200) ILIKE '%' || trim(term) || '%'
+        )
     ),
     vector_ranked AS (
-      SELECT d.id, d.file_id,
+      SELECT d.id AS doc_id, d.file_id,
              (1 - (d.embedding <=> query_embedding))::FLOAT AS vec_sim
       FROM documents d
       WHERE (filter_editions IS NULL OR d.edition = ANY(filter_editions))
@@ -116,29 +119,29 @@ BEGIN
       LIMIT match_count * 8
     ),
     fname_extra AS (
-      SELECT d.id, d.file_id,
+      SELECT d.id AS doc_id, d.file_id,
              (1 - (d.embedding <=> query_embedding))::FLOAT AS vec_sim
       FROM documents d
       JOIN fname_files ff ON d.file_id = ff.file_id
       WHERE d.embedding IS NOT NULL
         AND (filter_editions IS NULL OR d.edition = ANY(filter_editions))
-        AND d.id NOT IN (SELECT id FROM vector_ranked)
+        AND d.id NOT IN (SELECT vr.doc_id FROM vector_ranked vr)
       ORDER BY d.embedding <=> query_embedding
-      LIMIT match_count * 2
+      LIMIT match_count * 4
     ),
     merged AS (
-      SELECT v.id,
+      SELECT v.doc_id,
              CASE WHEN ff.file_id IS NOT NULL THEN 2.0 ELSE 0.0 END + v.vec_sim AS score
       FROM vector_ranked v
       LEFT JOIN fname_files ff ON v.file_id = ff.file_id
       UNION ALL
-      SELECT fe.id, 2.0 + fe.vec_sim AS score
+      SELECT fe.doc_id, 2.0 + fe.vec_sim AS score
       FROM fname_extra fe
     )
     SELECT d.id, d.file_id, d.file_name, d.content, d.edition, d.drive_id,
            d.drive_modified_at, d.drive_created_at, m.score AS similarity
     FROM merged m
-    JOIN documents d ON d.id = m.id
+    JOIN documents d ON d.id = m.doc_id
     ORDER BY m.score DESC
     LIMIT match_count;
   END IF;

@@ -74,7 +74,7 @@ export async function POST(req: NextRequest) {
     // ユーザーメッセージ保存と文書検索を並列実行
     [, docs] = await Promise.all([
       saveChatMessage(currentSessionId, "user", question, []),
-      searchDocuments(embedding, filterEditions, 8, expandedQuery),
+      searchDocuments(embedding, filterEditions, 15, expandedQuery),
     ]);
   } catch (err) {
     console.error("Chat search error:", err);
