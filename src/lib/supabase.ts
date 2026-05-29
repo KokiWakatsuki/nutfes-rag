@@ -58,7 +58,17 @@ export async function searchDocuments(
     filter_editions: editions,
   };
   if (queryText && queryText.trim().length >= 2) {
-    params.query_text = queryText.trim();
+    // 全角スペースなどを正規化
+    let q = queryText.trim().replace(/[\s　 ]+/g, ' ');
+    // スペースがない（= expandQueryTerms が元の質問を返した）場合、
+    // 日本語の助詞・句読点で区切ってキーワードを抽出する
+    if (!q.includes(' ') && q.length > 4) {
+      q = q
+        .replace(/[のはがをにでもとかなやねよてへからまでよりなどって。、！？…「」【】（）：；・～]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+    if (q.length >= 2) params.query_text = q;
   }
   const { data, error } = await getSupabase().rpc("match_documents", params);
   if (error) throw error;
